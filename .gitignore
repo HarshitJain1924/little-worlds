@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.vite/
+
+# Original downloaded asset packs — kept locally as the untouched source of truth.
+# Only the selected runtime GLBs are committed under public/models/.
+kenney_nature-kit/
+kenney_fantasy-town-kit_2.0/
+
+# local dev logs
+preview.log

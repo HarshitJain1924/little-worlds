@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#0d1730" />
+    <title>Little Worlds</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <canvas id="scene" aria-label="Little Worlds island scene"></canvas>
+
+    <div id="hud" aria-live="polite">
+      <div id="stats"></div>
+      <div id="quality" role="group" aria-label="Graphics quality"></div>
+    </div>
+
+    <div id="loading">
+      <div class="loading-inner">
+        <p class="loading-title">Little Worlds</p>
+        <div class="loading-bar"><span id="loading-fill"></span></div>
+        <p id="loading-label">preparing the island…</p>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
