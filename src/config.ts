@@ -63,9 +63,10 @@ export const PALETTE = {
   dirt: 0xb8754e,
   shore: 0xb9a887,
   rock: 0x7c81aa,
-  waterDeep: 0x0f5566,
-  waterShallow: 0x43c2bc,
-  foam: 0xe8fbf6,
+  rockWarm: 0x8d7f9a,
+  waterDeep: 0x1d7f8c,
+  waterShallow: 0x7de0d2,
+  foam: 0xf4fdfa,
 };
 
 export const WORLD = {

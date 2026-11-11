@@ -304,19 +304,24 @@ export function createWater(level: number): THREE.Mesh {
 
         float fresnel = pow(1.0 - clamp(dot(normal, viewDirection), 0.0, 1.0), 2.6);
 
-        vec3 color = mix(uDeep, uShallow, 1.0 - smoothstep(0.04, 0.7, vDepth));
-        color = mix(color, uSkyColor, fresnel * 0.28);
+        // Shallow water stays clear over the sandy bed; only the middle is
+        // properly deep, which is what stopped the pond reading as a dark hole.
+        float shallow = 1.0 - smoothstep(0.03, 0.85, vDepth);
+        vec3 color = mix(uDeep, uShallow, pow(shallow, 0.75));
+        color = mix(color, uSkyColor, fresnel * 0.3);
 
         vec3 halfVector = normalize(normalize(uSunDir) + viewDirection);
         float specular = pow(max(dot(normal, halfVector), 0.0), 110.0);
         color += vec3(1.0, 0.97, 0.9) * specular * 0.9;
 
-        // Foam tracks the real waterline, not a fixed radius.
-        float ripple = 0.55 + 0.45 * sin(uTime * 1.7 + vWorldPosition.x * 2.4 + vWorldPosition.z * 1.9);
-        float foam = smoothstep(0.1, 0.0, vDepth) * ripple;
-        color = mix(color, uFoam, clamp(foam, 0.0, 1.0) * 0.55);
+        // A restrained foam line along the real waterline, bright enough to read
+        // from the full-island camera distance.
+        float ripple = 0.7 + 0.3 * sin(uTime * 1.7 + vWorldPosition.x * 2.4 + vWorldPosition.z * 1.9);
+        float foam = smoothstep(0.14, 0.0, vDepth);
+        color = mix(color, uFoam, clamp(pow(foam, 1.2) * ripple, 0.0, 1.0) * 0.7);
 
-        gl_FragColor = vec4(color, 0.86 + fresnel * 0.1);
+        float alpha = mix(0.6, 0.93, smoothstep(0.0, 0.45, vDepth)) + fresnel * 0.08;
+        gl_FragColor = vec4(color, clamp(alpha, 0.0, 1.0));
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
       }

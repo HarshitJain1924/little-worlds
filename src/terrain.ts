@@ -105,6 +105,7 @@ const grassDark = new THREE.Color(PALETTE.grassDark);
 const dirt = new THREE.Color(PALETTE.dirt);
 const shore = new THREE.Color(PALETTE.shore);
 const rock = new THREE.Color(PALETTE.rock);
+const rockWarm = new THREE.Color(PALETTE.rockWarm);
 const rockDeep = new THREE.Color(0x4b4e6e);
 const strata = new THREE.Color(0x6f6479);
 
@@ -122,15 +123,20 @@ function vertexColor(x: number, z: number, height: number): THREE.Color {
   colorScratch.copy(grass).lerp(grassLight, variation * 0.4 + patches * 0.28);
   colorScratch.lerp(grassDark, smoothstep(0.5, 1, slope) * 0.5 + patches * 0.12);
 
+  // Open ground reads as drier grass rather than as missing vegetation.
+  const dry = smoothstep(0.62, 0.95, 1 - patches) * 0.35;
+  colorScratch.lerp(grassLight, dry * 0.5);
+  colorScratch.lerp(dirt, dry * 0.22);
+
   // Earth follows the rim, stone follows depth below the grass line.
   const edge = edgeRadius(Math.atan2(z, x));
   const rim = smoothstep(edge - 1.3, edge, radius);
   colorScratch.lerp(dirt, rim * 0.9);
 
-  // Damp, sandy ground on the bank so grass does not meet water directly.
+  // A narrow, damp sand band so grass does not meet water directly.
   const pond = pondDistance(x, z);
-  const bank = 1 - smoothstep(pond.edge * 0.82, pond.edge + 0.75, pond.distance);
-  colorScratch.lerp(shore, bank * 0.85);
+  const bank = 1 - smoothstep(pond.edge * 0.9, pond.edge + 0.55, pond.distance);
+  colorScratch.lerp(shore, bank * 0.9);
 
   colorScratch.lerp(rock, smoothstep(-1.0, -2.4, height));
   colorScratch.lerp(rockDeep, smoothstep(-3.0, -6.5, height));
@@ -143,8 +149,19 @@ function undersideColor(t: number, angle: number): THREE.Color {
   colorScratch.copy(dirt).lerp(rock, smoothstep(0.0, 0.16, t));
   colorScratch.lerp(rockDeep, smoothstep(0.45, 1, t));
 
+  // Broad colour drift so the rock is not one clean gradient: cool and warm
+  // patches wander down the face instead of running in even bands.
+  const drift = 0.5 + 0.5 * Math.sin(angle * 2.6 + t * 2.1) * Math.cos(angle * 1.3 - t * 3.4);
+  const grain = Math.sin(angle * 9 + t * 5.5) * 0.5 + 0.5;
+  colorScratch.lerp(rockWarm, smoothstep(0.55, 1, drift) * 0.3);
+  colorScratch.offsetHSL(0, 0, (grain - 0.5) * 0.045);
+
   const band = Math.sin(t * 26 + angle * 2.2) * 0.5 + 0.5;
-  colorScratch.lerp(strata, smoothstep(0.55, 1, band) * 0.45);
+  colorScratch.lerp(strata, smoothstep(0.5, 1, band) * 0.5);
+
+  // Weathering: the tip is dirtier and the shallow shelves catch less light.
+  colorScratch.lerp(rockDeep, smoothstep(0.72, 1, t) * 0.3);
+  colorScratch.offsetHSL(0, 0, Math.sin(angle * 3.7 + t * 9.0) * 0.02);
 
   return colorScratch;
 }
@@ -154,6 +171,7 @@ export function createTerrain(): THREE.Mesh {
   const rings = 26;
   const skirtRings = 14;
   const segments = 84;
+  const rows = rings + skirtRings;
   const positions: number[] = [];
   const colors: number[] = [];
   const indices: number[] = [];
@@ -163,42 +181,56 @@ export function createTerrain(): THREE.Mesh {
     colors.push(color.r, color.g, color.b);
   };
 
-  // Grass surface. The ring radius follows the rim outline, so the top edge is
-  // as irregular as the underside instead of being a perfect circle.
-  for (let ring = 0; ring <= rings; ring += 1) {
-    const t = ring / rings;
-    for (let segment = 0; segment < segments; segment += 1) {
-      const angle = (segment / segments) * Math.PI * 2;
-      const radius = edgeRadius(angle) * Math.pow(t, 0.92);
-      const x = Math.cos(angle) * radius;
-      const z = Math.sin(angle) * radius;
-      const y = terrainHeightAt(x, z);
-      push(x, y, z, vertexColor(x, z, y));
+  // A single centre vertex instead of a full ring of coincident vertices: the
+  // fan below covers the same ground with real triangles.
+  const centreY = terrainHeightAt(0, 0);
+  push(0, centreY, 0, vertexColor(0, 0, centreY));
+
+  // Rows 1..rings are the grass surface, following the rim outline so the top
+  // edge is as irregular as the underside; the rest taper down to the tip.
+  for (let row = 1; row <= rows; row += 1) {
+    if (row <= rings) {
+      const t = row / rings;
+      for (let segment = 0; segment < segments; segment += 1) {
+        const angle = (segment / segments) * Math.PI * 2;
+        const radius = edgeRadius(angle) * Math.pow(t, 0.92);
+        const x = Math.cos(angle) * radius;
+        const z = Math.sin(angle) * radius;
+        const y = terrainHeightAt(x, z);
+        push(x, y, z, vertexColor(x, z, y));
+      }
+    } else {
+      const t = (row - rings) / skirtRings;
+      for (let segment = 0; segment < segments; segment += 1) {
+        const angle = (segment / segments) * Math.PI * 2;
+        const { radius, y } = undersideProfile(t, angle);
+        push(Math.cos(angle) * radius, y, Math.sin(angle) * radius, undersideColor(t, angle));
+      }
     }
   }
 
-  // Underside: continues from the rim down to a tip.
-  for (let step = 1; step <= skirtRings; step += 1) {
-    const t = step / skirtRings;
-    for (let segment = 0; segment < segments; segment += 1) {
-      const angle = (segment / segments) * Math.PI * 2;
-      const { radius, y } = undersideProfile(t, angle);
-      push(Math.cos(angle) * radius, y, Math.sin(angle) * radius, undersideColor(t, angle));
-    }
+  const rowStart = (row: number) => 1 + (row - 1) * segments;
+
+  // Fan from the centre vertex to the first ring.
+  for (let segment = 0; segment < segments; segment += 1) {
+    const next = (segment + 1) % segments;
+    indices.push(0, 1 + next, 1 + segment);
   }
 
-  // Rows are 0..rings for the grass surface (rings + 1 rows), then
-  // rings + 1..rings + skirtRings for the underside, so the final row index is
-  // rings + skirtRings and there is one quad band between each pair of rows.
-  const finalRow = rings + skirtRings;
-  for (let ring = 0; ring < finalRow; ring += 1) {
+  // One quad band between each pair of rows.
+  for (let row = 1; row < rows; row += 1) {
+    const inner = rowStart(row);
+    const outer = rowStart(row + 1);
     for (let segment = 0; segment < segments; segment += 1) {
       const next = (segment + 1) % segments;
-      const a = ring * segments + segment;
-      const b = ring * segments + next;
-      const c = (ring + 1) * segments + segment;
-      const d = (ring + 1) * segments + next;
-      indices.push(a, b, c, b, d, c);
+      indices.push(
+        inner + segment,
+        inner + next,
+        outer + segment,
+        inner + next,
+        outer + next,
+        outer + segment,
+      );
     }
   }
 
@@ -209,10 +241,10 @@ export function createTerrain(): THREE.Mesh {
   const tipColor = undersideColor(1, 0);
   colors.push(tipColor.r, tipColor.g, tipColor.b);
 
-  const lastRingStart = finalRow * segments;
+  const lastRowStart = rowStart(rows);
   for (let segment = 0; segment < segments; segment += 1) {
     const next = (segment + 1) % segments;
-    indices.push(lastRingStart + segment, lastRingStart + next, tipIndex);
+    indices.push(lastRowStart + segment, lastRowStart + next, tipIndex);
   }
 
   const geometry = new THREE.BufferGeometry();

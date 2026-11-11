@@ -50,6 +50,11 @@ interface ScatterOptions {
   strays?: number;
   scale?: [number, number];
   avoid?: { x: number; z: number; radius: number }[];
+  /**
+   * Hand-placed instances sharing this model. They are put at the front of the
+   * list so a quality preset that trims the tail never removes them.
+   */
+  extra?: Placement[];
 }
 
 const avoidDefault = [
@@ -124,7 +129,7 @@ function scatterPoints(options: ScatterOptions): Placement[] {
   }
 
   // Shuffle so a quality preset that trims the tail thins every patch evenly
-  // instead of deleting whole clumps.
+  // instead of deleting whole clumps. Hand-placed extras stay at the front.
   for (let i = points.length - 1; i > 0; i -= 1) {
     const j = Math.floor(rng() * (i + 1));
     const swap = points[i];
@@ -132,7 +137,7 @@ function scatterPoints(options: ScatterOptions): Placement[] {
     points[j] = swap;
   }
 
-  return points;
+  return options.extra ? [...options.extra, ...points] : points;
 }
 
 /** A batch of instanced models whose instance count can be lowered at runtime. */
@@ -169,10 +174,15 @@ function buildHut(models: ModelLibrary): THREE.Group {
     group.add(cloneModel(models.get(name), { x, y, z, yaw }));
   };
 
-  // Wall bays run along local X; the front face is +Z.
-  add('wall-block', -1, 0, 0);
-  add('wall-block', 0, 0, 0);
-  add('wall-block', 1, 0, 0);
+  // Wall bays run along local X; the front face is +Z. Repeated modules are
+  // batched into one instanced mesh instead of one clone each.
+  group.add(
+    instanceModel(models.get('wall-block'), [
+      { x: -1, y: 0, z: 0 },
+      { x: 0, y: 0, z: 0 },
+      { x: 1, y: 0, z: 0 },
+    ]),
+  );
 
   // Door panel is 0.53 deep on its +X face: rotate to face +Z, sink it into the wall.
   add('wall-door', 0, 0, 0.25, -Math.PI / 2);
@@ -182,15 +192,23 @@ function buildHut(models: ModelLibrary): THREE.Group {
 
   // Roof: 0.55 end + 1.1 + 1.1 + 0.55 end = 3.3 over a 3.0 building.
   add('roof-gable-end', -1.1, 1, 0, Math.PI);
-  add('roof-gable', -1.1, 1, 0);
-  add('roof-gable', 0, 1, 0);
+  group.add(
+    instanceModel(models.get('roof-gable'), [
+      { x: -1.1, y: 1, z: 0 },
+      { x: 0, y: 1, z: 0 },
+    ]),
+  );
   add('roof-gable-end', 1.1, 1, 0);
 
   add('chimney', 0.95, 1, -0.18);
 
-  add('planks', -1, 0.02, 1);
-  add('planks', 0, 0.02, 1);
-  add('planks', 1, 0.02, 1);
+  group.add(
+    instanceModel(models.get('planks'), [
+      { x: -1, y: 0.02, z: 1 },
+      { x: 0, y: 0.02, z: 1 },
+      { x: 1, y: 0.02, z: 1 },
+    ]),
+  );
 
   add('lantern', 1.85, 0, 1.15);
   add('stump_round', -1.95, 0, 1.35, 0.6);
@@ -216,6 +234,55 @@ function buildCamp(models: ModelLibrary): THREE.Group {
   add('log', SITES.camp.x + 0.9, SITES.camp.z - 0.7, 1.35, 0.9);
 
   return group;
+}
+
+/**
+ * Reeds and flat rocks along the waterline. These share the models and materials
+ * of the scatter layers they are merged into, so the shoreline planting costs no
+ * extra draw calls.
+ */
+function pondReeds(): Placement[] {
+  const reeds: Placement[] = [];
+  const clusters = [
+    [0.15, 0.45, 0.75],
+    [2.05, 2.3],
+    [3.75, 4.05, 4.35],
+    [5.35, 5.6],
+  ];
+  for (const cluster of clusters) {
+    const base = cluster[0];
+    for (const angle of cluster) {
+      const r = pondRadius(angle) * (1.0 + rng() * 0.09);
+      const jitter = (rng() - 0.5) * 0.35;
+      const x = SITES.pond.x + Math.cos(angle + jitter * 0.1) * r;
+      const z = SITES.pond.z + Math.sin(base + jitter * 0.1) * r;
+      reeds.push({
+        x,
+        y: terrainHeightAt(x, z),
+        z,
+        yaw: rng() * TAU,
+        scale: 0.5 + rng() * 0.3,
+      });
+    }
+  }
+  return reeds;
+}
+
+function pondShoreRocks(): Placement[] {
+  const rocks: Placement[] = [];
+  for (const angle of [0.95, 1.75, 2.85, 4.0, 5.05]) {
+    const r = pondRadius(angle) * (1.02 + rng() * 0.05);
+    const x = SITES.pond.x + Math.cos(angle) * r;
+    const z = SITES.pond.z + Math.sin(angle) * r;
+    rocks.push({
+      x,
+      y: terrainHeightAt(x, z),
+      z,
+      yaw: rng() * TAU,
+      scale: 0.55 + rng() * 0.4,
+    });
+  }
+  return rocks;
 }
 
 function buildPondDecor(models: ModelLibrary, waterLevel: number): THREE.Group {
@@ -247,54 +314,36 @@ function buildPondDecor(models: ModelLibrary, waterLevel: number): THREE.Group {
 }
 
 /**
- * Reeds and flat rocks along the waterline. They hug the shoreline angle by
- * angle, so the pond edge reads as a planted bank rather than a cut circle.
+ * A tended bed in front of the cottage. Authored rather than scattered, so the
+ * ground left of the door reads as a yard instead of as a bald patch.
  */
-function buildPondShore(models: ModelLibrary): THREE.Group {
-  const group = new THREE.Group();
-  group.name = 'pond-shore';
-
-  const reeds: Placement[] = [];
-  const reedGroups = [
-    [0.15, 0.45, 0.75],
-    [2.05, 2.3],
-    [3.75, 4.05, 4.35],
-    [5.35, 5.6],
+function cottageGarden(): { red: Placement[]; purple: Placement[]; yellow: Placement[] } {
+  const spots: [number, number][] = [
+    [2.1, 0.5],
+    [2.5, 0.15],
+    [2.0, 1.2],
+    [2.35, 2.55],
+    [2.8, 2.95],
+    [1.95, 2.9],
   ];
-  for (const cluster of reedGroups) {
-    const base = cluster[0];
-    for (const angle of cluster) {
-      const r = pondRadius(angle) * (1.0 + rng() * 0.09);
-      const jitter = (rng() - 0.5) * 0.35;
-      const x = SITES.pond.x + Math.cos(angle + jitter * 0.1) * r;
-      const z = SITES.pond.z + Math.sin(base + jitter * 0.1) * r;
-      reeds.push({
-        x,
-        y: terrainHeightAt(x, z),
-        z,
-        yaw: rng() * TAU,
-        scale: 0.5 + rng() * 0.3,
-      });
-    }
-  }
-  group.add(instanceModel(models.get('grass_large'), reeds, { castShadow: false, receiveShadow: true }));
+  const red: Placement[] = [];
+  const purple: Placement[] = [];
+  const yellow: Placement[] = [];
 
-  const rocks: Placement[] = [];
-  for (const angle of [0.95, 1.75, 2.85, 4.0, 5.05]) {
-    const r = pondRadius(angle) * (1.02 + rng() * 0.05);
-    const x = SITES.pond.x + Math.cos(angle) * r;
-    const z = SITES.pond.z + Math.sin(angle) * r;
-    rocks.push({
+  spots.forEach(([x, z], index) => {
+    const placement: Placement = {
       x,
       y: terrainHeightAt(x, z),
       z,
       yaw: rng() * TAU,
-      scale: 0.55 + rng() * 0.4,
-    });
-  }
-  group.add(instanceModel(models.get('rock_smallFlatA'), rocks, { receiveShadow: true }));
+      scale: 0.9 + rng() * 0.25,
+    };
+    if (index % 3 === 0) red.push(placement);
+    else if (index % 3 === 1) purple.push(placement);
+    else yellow.push(placement);
+  });
 
-  return group;
+  return { red, purple, yellow };
 }
 
 /**
@@ -323,6 +372,10 @@ function buildPath(models: ModelLibrary): THREE.Group {
     },
   ];
 
+  // Every stone is the same asset: one instanced mesh for all of them costs a
+  // handful of draws where clones cost six each (three primitives, two passes).
+  const stones: Placement[] = [];
+
   for (const leg of legs) {
     const dx = leg.to.x - door.x;
     const dz = leg.to.z - door.z;
@@ -339,16 +392,18 @@ function buildPath(models: ModelLibrary): THREE.Group {
       if (Math.hypot(x - SITES.pond.x, z - SITES.pond.z) < SITES.pond.radius + 0.45) continue;
       if (Math.hypot(x, z) > edgeRadius(Math.atan2(z, x)) - 1.2) continue;
 
-      group.add(
-        cloneModel(models.get('path_stone'), {
-          x,
-          y: terrainHeightAt(x, z) + 0.012,
-          z,
-          yaw: rng() * TAU,
-          scale: 0.72 + rng() * 0.24,
-        }),
-      );
+      stones.push({
+        x,
+        y: terrainHeightAt(x, z) + 0.012,
+        z,
+        yaw: rng() * TAU,
+        scale: 0.72 + rng() * 0.24,
+      });
     }
+  }
+
+  if (stones.length > 0) {
+    group.add(instanceModel(models.get('path_stone'), stones));
   }
 
   return group;
@@ -363,11 +418,13 @@ export function buildIsland(models: ModelLibrary): IslandView {
   const root = new THREE.Group();
   root.name = 'island';
   const layers: Layer[] = [];
+  const garden = cottageGarden();
 
   const grassMix: [string, number][] = [
     ['grass', 0.6],
     ['grass_large', 0.4],
   ];
+  const reeds = pondReeds();
   for (const [name, share] of grassMix) {
     layers.push(
       addLayer(
@@ -384,11 +441,18 @@ export function buildIsland(models: ModelLibrary): IslandView {
           openness: 0.5,
           strays: 0.18,
           scale: [0.55, 0.9],
+          extra: name === 'grass_large' ? reeds : undefined,
         }),
         'grass',
       ),
     );
   }
+
+  const gardenExtras: Record<string, Placement[]> = {
+    flower_redA: garden.red,
+    flower_purpleA: garden.purple,
+    flower_yellowA: garden.yellow,
+  };
 
   const flowerMix: [string, number][] = [
     ['flower_redA', 0.3],
@@ -412,6 +476,7 @@ export function buildIsland(models: ModelLibrary): IslandView {
           openness: 0.85,
           strays: 0.1,
           scale: [0.85, 1.2],
+          extra: gardenExtras[name],
         }),
         'flowers',
       ),
@@ -507,6 +572,7 @@ export function buildIsland(models: ModelLibrary): IslandView {
     ),
   );
 
+  const shoreRocks = pondShoreRocks();
   for (const [name, count] of [
     ['rock_largeA', 5],
     ['rock_tallA', 3],
@@ -527,6 +593,7 @@ export function buildIsland(models: ModelLibrary): IslandView {
           clumpRadius: [0.5, 1.4],
           openness: 0.5,
           scale: [0.8, 1.15],
+          extra: name === 'rock_smallFlatA' ? shoreRocks : undefined,
         }),
         'trees',
       ),
@@ -536,7 +603,6 @@ export function buildIsland(models: ModelLibrary): IslandView {
   root.add(buildHut(models));
   root.add(buildCamp(models));
   root.add(buildPondDecor(models, SITES.pond.waterLevel));
-  root.add(buildPondShore(models));
   root.add(buildPath(models));
 
   const totals: Record<DensityKind, number> = { grass: 0, flowers: 0, trees: 0 };
