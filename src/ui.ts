@@ -11,7 +11,7 @@ export interface Stats {
   update: (values: { fps: number | null; frameMs: number | null; drawCalls: number; triangles: number }, preset: QualityName) => void;
 }
 
-export function createStats(): Stats {
+export function createStats(context: { antialias: boolean }): Stats {
   let fps: number | null = null;
   let frameMs: number | null = null;
   let drawCalls = 0;
@@ -23,7 +23,9 @@ export function createStats(): Stats {
       `fps    ${fps === null ? '  —' : fps.toFixed(0).padStart(3)}  (${frameMs === null ? '—' : frameMs.toFixed(1)} ms)`,
       `draws  ${drawCalls}`,
       `tris   ${(triangles / 1000).toFixed(1)}k`,
-      `preset ${QUALITY[preset].label.toLowerCase()}`,
+      // MSAA is decided when the WebGL context is created and cannot change after,
+      // so it is shown as the real context state, not as a preset property.
+      `preset ${QUALITY[preset].label.toLowerCase()} · aa ${context.antialias ? 'on' : 'off'}`,
     ].join('\n');
   };
 

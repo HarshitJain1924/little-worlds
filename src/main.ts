@@ -27,7 +27,12 @@ function detectQuality(): QualityName {
   if (coarsePointer) {
     return memory >= 6 && cores >= 6 ? 'medium' : 'low';
   }
-  return cores >= 6 ? 'high' : 'medium';
+
+  // Logical cores say nothing about the GPU: a 4-core laptop with a dedicated
+  // card and an 8-core one on integrated graphics both report a high count, and
+  // deviceMemory only reveals the RAM tier. Start conservative and let High be
+  // an explicit opt-in (remembered once chosen) instead of guessing.
+  return 'medium';
 }
 
 async function boot(): Promise<void> {
@@ -57,7 +62,9 @@ async function boot(): Promise<void> {
   scene.fog = new THREE.FogExp2(PALETTE.fog, QUALITY[current].fogDensity);
 
   const orbit = new OrbitCamera(canvas, window.innerWidth / window.innerHeight);
-  const stats = createStats();
+  // Read the real context flag: MSAA is fixed at context creation, so the panel
+  // must report it rather than assume it follows the selected preset.
+  const stats = createStats({ antialias: renderer.getContextAttributes()?.antialias ?? false });
 
   setLoading(0.02, 'loading models…');
   const models = new ModelLibrary();

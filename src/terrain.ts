@@ -144,8 +144,11 @@ export function createTerrain(): THREE.Mesh {
     }
   }
 
-  const totalRings = rings + skirtRings;
-  for (let ring = 0; ring < totalRings; ring += 1) {
+  // Rows are 0..rings for the grass surface (rings + 1 rows), then
+  // rings + 1..rings + skirtRings for the underside, so the final row index is
+  // rings + skirtRings and there is one quad band between each pair of rows.
+  const finalRow = rings + skirtRings;
+  for (let ring = 0; ring < finalRow; ring += 1) {
     for (let segment = 0; segment < segments; segment += 1) {
       const next = (segment + 1) % segments;
       const a = ring * segments + segment;
@@ -163,7 +166,7 @@ export function createTerrain(): THREE.Mesh {
   const tipColor = undersideColor(1, 0);
   colors.push(tipColor.r, tipColor.g, tipColor.b);
 
-  const lastRingStart = (totalRings - 1) * segments;
+  const lastRingStart = finalRow * segments;
   for (let segment = 0; segment < segments; segment += 1) {
     const next = (segment + 1) % segments;
     indices.push(lastRingStart + segment, lastRingStart + next, tipIndex);
