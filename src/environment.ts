@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { PALETTE, SITES, WORLD } from './config';
+import { pondRadius, terrainHeightAt } from './terrain';
 
 /** Gradient sky dome with a soft sun glow, drawn without fog. */
 export function createSky(sunDirection: THREE.Vector3): THREE.Mesh {
@@ -200,10 +201,62 @@ export function createLighting(): Lighting {
   return { sun, hemisphere, sunDirection };
 }
 
-/** Reusable pond water with animated ripples and a soft shoreline. */
-export function createWater(radius: number, level: number): THREE.Mesh {
-  const geometry = new THREE.CircleGeometry(radius, 72);
-  geometry.rotateX(-Math.PI / 2);
+/**
+ * Pond water. The disc is a little wider than the basin and every vertex carries
+ * its real water depth, so the shader can drop the dry part and draw the foam
+ * along the waterline the terrain actually makes.
+ */
+export function createWater(level: number): THREE.Mesh {
+  const segments = 96;
+  const rings = 10;
+  const positions: number[] = [];
+  const depths: number[] = [];
+  const indices: number[] = [];
+
+  const depthAt = (x: number, z: number) => level - terrainHeightAt(SITES.pond.x + x, SITES.pond.z + z);
+
+  positions.push(0, 0, 0);
+  depths.push(depthAt(0, 0));
+
+  for (let ring = 1; ring <= rings; ring += 1) {
+    const t = ring / rings;
+    for (let segment = 0; segment < segments; segment += 1) {
+      const angle = (segment / segments) * Math.PI * 2;
+      const radius = pondRadius(angle) * 1.22 * t;
+      const x = Math.cos(angle) * radius;
+      const z = Math.sin(angle) * radius;
+      positions.push(x, 0, z);
+      depths.push(depthAt(x, z));
+    }
+  }
+
+  // Centre fan.
+  for (let segment = 0; segment < segments; segment += 1) {
+    const next = (segment + 1) % segments;
+    indices.push(0, 1 + next, 1 + segment);
+  }
+
+  // Bands between successive rings.
+  for (let ring = 1; ring < rings; ring += 1) {
+    const inner = 1 + (ring - 1) * segments;
+    const outer = 1 + ring * segments;
+    for (let segment = 0; segment < segments; segment += 1) {
+      const next = (segment + 1) % segments;
+      indices.push(
+        inner + segment,
+        inner + next,
+        outer + segment,
+        inner + next,
+        outer + next,
+        outer + segment,
+      );
+    }
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('aDepth', new THREE.Float32BufferAttribute(depths, 1));
+  geometry.setIndex(indices);
 
   const material = new THREE.ShaderMaterial({
     transparent: true,
@@ -217,10 +270,11 @@ export function createWater(radius: number, level: number): THREE.Mesh {
       uSunDir: { value: new THREE.Vector3(...WORLD.sunDirection).normalize() },
     },
     vertexShader: /* glsl */ `
-      varying vec2 vUv;
+      attribute float aDepth;
+      varying float vDepth;
       varying vec3 vWorldPosition;
       void main() {
-        vUv = uv;
+        vDepth = aDepth;
         vec4 world = modelMatrix * vec4(position, 1.0);
         vWorldPosition = world.xyz;
         gl_Position = projectionMatrix * viewMatrix * world;
@@ -233,12 +287,13 @@ export function createWater(radius: number, level: number): THREE.Mesh {
       uniform vec3 uFoam;
       uniform vec3 uSkyColor;
       uniform vec3 uSunDir;
-      varying vec2 vUv;
+      varying float vDepth;
       varying vec3 vWorldPosition;
 
       void main() {
-        vec2 centred = vUv - 0.5;
-        float distanceFromCentre = length(centred) * 2.0;
+        // Ground above the waterline: drop it, so the pond outline is the shape
+        // the basin makes rather than the edge of this disc.
+        if (vDepth < 0.0) discard;
 
         float waveA = sin(vWorldPosition.x * 3.1 + uTime * 1.05);
         float waveB = sin(vWorldPosition.z * 2.6 - uTime * 0.85 + vWorldPosition.x * 1.4);
@@ -249,17 +304,19 @@ export function createWater(radius: number, level: number): THREE.Mesh {
 
         float fresnel = pow(1.0 - clamp(dot(normal, viewDirection), 0.0, 1.0), 2.6);
 
-        vec3 color = mix(uDeep, uShallow, 0.2 + distanceFromCentre * 0.35);
+        vec3 color = mix(uDeep, uShallow, 1.0 - smoothstep(0.04, 0.7, vDepth));
         color = mix(color, uSkyColor, fresnel * 0.28);
 
         vec3 halfVector = normalize(normalize(uSunDir) + viewDirection);
         float specular = pow(max(dot(normal, halfVector), 0.0), 110.0);
         color += vec3(1.0, 0.97, 0.9) * specular * 0.9;
 
-        float foam = smoothstep(0.82, 1.0, distanceFromCentre) * (0.5 + 0.5 * sin(uTime * 1.7 + distanceFromCentre * 24.0));
-        color = mix(color, uFoam, foam * 0.45);
+        // Foam tracks the real waterline, not a fixed radius.
+        float ripple = 0.55 + 0.45 * sin(uTime * 1.7 + vWorldPosition.x * 2.4 + vWorldPosition.z * 1.9);
+        float foam = smoothstep(0.1, 0.0, vDepth) * ripple;
+        color = mix(color, uFoam, clamp(foam, 0.0, 1.0) * 0.55);
 
-        gl_FragColor = vec4(color, 0.9 + fresnel * 0.08);
+        gl_FragColor = vec4(color, 0.86 + fresnel * 0.1);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
       }

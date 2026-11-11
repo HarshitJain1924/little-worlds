@@ -6,17 +6,43 @@ const smoothstep = (edge0: number, edge1: number, value: number): number => {
   return t * t * (3 - 2 * t);
 };
 
-/** The island outline is not a perfect circle: the rim radius varies with angle. */
-function edgeRadius(angle: number): number {
+/**
+ * Rim radius at a given angle. Three broad lobes give the island an uneven
+ * footprint; the finer terms stop the edge from reading as a set of arcs.
+ */
+export function edgeRadius(angle: number): number {
+  const lobes =
+    Math.sin(angle + 0.9) * 0.072 +
+    Math.sin(angle * 2 - 1.15) * 0.05 +
+    Math.sin(angle * 3 + 0.4) * 0.032 +
+    Math.sin(angle * 7 + 1.3) * 0.015 +
+    Math.sin(angle * 11 - 0.6) * 0.008;
+  return WORLD.radius * (1 + lobes);
+}
+
+/** Pond outline radius at a given angle: an irregular basin, not a circle. */
+export function pondRadius(angle: number): number {
   return (
-    WORLD.radius *
-    (1 + Math.sin(angle * 3) * 0.055 + Math.sin(angle * 7 + 1.3) * 0.03 + Math.sin(angle * 11 - 0.6) * 0.015)
+    SITES.pond.radius *
+    (1 +
+      Math.sin(angle * 2 + 0.7) * 0.15 +
+      Math.sin(angle * 3 - 1.5) * 0.08 +
+      Math.sin(angle * 5 + 2.1) * 0.035)
   );
+}
+
+/** Distance from the pond centre plus the pond's radius in that direction. */
+function pondDistance(x: number, z: number): { distance: number; edge: number } {
+  return {
+    distance: Math.hypot(x - SITES.pond.x, z - SITES.pond.z),
+    edge: pondRadius(Math.atan2(z - SITES.pond.z, x - SITES.pond.x)),
+  };
 }
 
 /** Island surface height at a world position. Shared by the mesh, scatter and props. */
 export function terrainHeightAt(x: number, z: number): number {
   const radius = Math.hypot(x, z);
+  const edge = edgeRadius(Math.atan2(z, x));
 
   let height =
     Math.sin(x * 0.62 + Math.cos(z * 0.41) * 1.2) * 0.16 +
@@ -32,13 +58,18 @@ export function terrainHeightAt(x: number, z: number): number {
   );
   height *= flatten;
 
-  // Pond basin.
-  const distanceToPond = Math.hypot(x - SITES.pond.x, z - SITES.pond.z);
-  const basin = 1 - smoothstep(SITES.pond.radius * 0.5, SITES.pond.radius, distanceToPond);
+  // Broad landform: the island leans a little, so the ground is not one plate.
+  // Applied after the flattening so the built pads follow the land rather than
+  // sitting in a hollow.
+  height += Math.cos(Math.atan2(z, x) - 0.7) * 0.22 * smoothstep(0.1, 1, radius / WORLD.radius);
+
+  // Pond basin with a soft bank, both following the irregular pond outline.
+  const pond = pondDistance(x, z);
+  const basin = 1 - smoothstep(pond.edge * 0.42, pond.edge, pond.distance);
   height -= basin * SITES.pond.depth;
+  height += Math.exp(-Math.pow((pond.distance - pond.edge - 0.5) / 0.45, 2)) * 0.07;
 
   // A raised lip, then a short steep wall over the edge.
-  const edge = edgeRadius(Math.atan2(z, x));
   const rise = Math.exp(-Math.pow((radius - (edge - 1.4)) / 0.85, 2)) * 0.12;
   const rim = smoothstep(edge - 0.85, edge, radius);
   height += rise * (1 - rim);
@@ -55,12 +86,16 @@ function undersideProfile(t: number, angle: number): { radius: number; y: number
     Math.sin(angle * 5 + t * 2.6) * 0.1 +
     Math.sin(angle * 11 - t * 4) * 0.05 +
     Math.sin(angle * 2.3 + t * 7) * 0.04;
-  const radius = edgeRadius(angle) * (1 - 0.94 * taper) * wobble;
+  // One side swells and the other is undercut, so the rock is not a cone.
+  const buttress = Math.sin(angle * 2 + 1.4) * 0.16 * Math.sin(t * Math.PI);
+  const radius = edgeRadius(angle) * (1 - 0.94 * taper) * (wobble + buttress);
   const y =
     -1.15 -
     6.4 * Math.pow(t, 0.9) +
     Math.sin(angle * 7 + t * 5) * 0.28 * (1 - t) +
-    Math.sin(angle * 3 + 0.7) * 0.16;
+    Math.sin(angle * 3 + 0.7) * 0.16 +
+    // A slow tilt through the rock, deepest on one side.
+    Math.sin(angle * 2 - 0.5) * 0.55 * Math.sin(t * Math.PI);
   return { radius, y };
 }
 
@@ -68,6 +103,7 @@ const grass = new THREE.Color(PALETTE.grass);
 const grassLight = new THREE.Color(PALETTE.grassLight);
 const grassDark = new THREE.Color(PALETTE.grassDark);
 const dirt = new THREE.Color(PALETTE.dirt);
+const shore = new THREE.Color(PALETTE.shore);
 const rock = new THREE.Color(PALETTE.rock);
 const rockDeep = new THREE.Color(0x4b4e6e);
 const strata = new THREE.Color(0x6f6479);
@@ -90,6 +126,12 @@ function vertexColor(x: number, z: number, height: number): THREE.Color {
   const edge = edgeRadius(Math.atan2(z, x));
   const rim = smoothstep(edge - 1.3, edge, radius);
   colorScratch.lerp(dirt, rim * 0.9);
+
+  // Damp, sandy ground on the bank so grass does not meet water directly.
+  const pond = pondDistance(x, z);
+  const bank = 1 - smoothstep(pond.edge * 0.82, pond.edge + 0.75, pond.distance);
+  colorScratch.lerp(shore, bank * 0.85);
+
   colorScratch.lerp(rock, smoothstep(-1.0, -2.4, height));
   colorScratch.lerp(rockDeep, smoothstep(-3.0, -6.5, height));
 
@@ -121,12 +163,13 @@ export function createTerrain(): THREE.Mesh {
     colors.push(color.r, color.g, color.b);
   };
 
-  // Grass surface.
+  // Grass surface. The ring radius follows the rim outline, so the top edge is
+  // as irregular as the underside instead of being a perfect circle.
   for (let ring = 0; ring <= rings; ring += 1) {
     const t = ring / rings;
-    const radius = WORLD.radius * Math.pow(t, 0.92);
     for (let segment = 0; segment < segments; segment += 1) {
       const angle = (segment / segments) * Math.PI * 2;
+      const radius = edgeRadius(angle) * Math.pow(t, 0.92);
       const x = Math.cos(angle) * radius;
       const z = Math.sin(angle) * radius;
       const y = terrainHeightAt(x, z);

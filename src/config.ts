@@ -61,6 +61,7 @@ export const PALETTE = {
   grassLight: 0x6ee6c9,
   grassDark: 0x1d9b86,
   dirt: 0xb8754e,
+  shore: 0xb9a887,
   rock: 0x7c81aa,
   waterDeep: 0x0f5566,
   waterShallow: 0x43c2bc,
@@ -80,8 +81,11 @@ export const CAMERA = {
   distance: 27,
   minDistance: 13,
   maxDistance: 38,
-  /** Half-extent of the island used to fit it into narrow viewports. */
-  fitRadius: 8.8,
+  /**
+   * Half-extent of the island used to fit it into narrow viewports. The rim now
+   * varies by up to ~18%, so this covers the widest lobe with a little margin.
+   */
+  fitRadius: 9.7,
   pitch: (33 * Math.PI) / 180,
   yaw: (46 * Math.PI) / 180,
   minPitch: (20 * Math.PI) / 180,

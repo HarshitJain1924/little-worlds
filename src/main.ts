@@ -80,7 +80,7 @@ async function boot(): Promise<void> {
   scene.add(clouds.group);
 
   scene.add(createTerrain());
-  scene.add(createWater(SITES.pond.radius * 0.82, SITES.pond.waterLevel));
+  scene.add(createWater(SITES.pond.waterLevel));
 
   const island = buildIsland(models);
   scene.add(island.root);
