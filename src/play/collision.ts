@@ -44,25 +44,45 @@ export function segmentBoxEntry(
   box: BoxObstacle,
   padding = 0,
 ): number {
-  const direction = [toX - fromX, toY - fromY, toZ - fromZ];
-  const origin = [fromX, fromY, fromZ];
-  const min = [box.minX - padding, box.bottom - padding, box.minZ - padding];
-  const max = [box.maxX + padding, box.top + padding, box.maxZ + padding];
+  const dx = toX - fromX;
+  const dy = toY - fromY;
+  const dz = toZ - fromZ;
 
   let entry = 0;
   let exit = 1;
 
+  // Slab test, unrolled over scalars: this runs for every camera boom and every
+  // attack line-of-sight check, so it allocates nothing.
   for (let axis = 0; axis < 3; axis += 1) {
-    const d = direction[axis];
-    const o = origin[axis];
+    let origin: number;
+    let delta: number;
+    let min: number;
+    let max: number;
 
-    if (Math.abs(d) < EPSILON) {
-      if (o < min[axis] || o > max[axis]) return 1;
+    if (axis === 0) {
+      origin = fromX;
+      delta = dx;
+      min = box.minX - padding;
+      max = box.maxX + padding;
+    } else if (axis === 1) {
+      origin = fromY;
+      delta = dy;
+      min = box.bottom - padding;
+      max = box.top + padding;
+    } else {
+      origin = fromZ;
+      delta = dz;
+      min = box.minZ - padding;
+      max = box.maxZ + padding;
+    }
+
+    if (Math.abs(delta) < EPSILON) {
+      if (origin < min || origin > max) return 1;
       continue;
     }
 
-    let near = (min[axis] - o) / d;
-    let far = (max[axis] - o) / d;
+    let near = (min - origin) / delta;
+    let far = (max - origin) / delta;
     if (near > far) {
       const swap = near;
       near = far;
@@ -151,6 +171,46 @@ export function nearestObstruction(
  * Line of sight between two points, ignoring obstacles that both ends are
  * already inside (the camera often sits on the far side of nothing).
  */
+export interface PlanarBox {
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+}
+
+/**
+ * Pushes a ground-plane position out of any blocker it overlaps, along the
+ * shallowest escape axis. Shared by the player and enemies so both respect the
+ * same walls, pillars and crates.
+ */
+export function resolveBlockers(
+  position: { x: number; z: number },
+  blockers: readonly PlanarBox[],
+  radius: number,
+): void {
+  for (const blocker of blockers) {
+    if (
+      position.x < blocker.minX - radius ||
+      position.x > blocker.maxX + radius ||
+      position.z < blocker.minZ - radius ||
+      position.z > blocker.maxZ + radius
+    ) {
+      continue;
+    }
+
+    const left = position.x - (blocker.minX - radius);
+    const right = blocker.maxX + radius - position.x;
+    const back = position.z - (blocker.minZ - radius);
+    const front = blocker.maxZ + radius - position.z;
+    const smallest = Math.min(left, right, back, front);
+
+    if (smallest === left) position.x = blocker.minX - radius;
+    else if (smallest === right) position.x = blocker.maxX + radius;
+    else if (smallest === back) position.z = blocker.minZ - radius;
+    else position.z = blocker.maxZ + radius;
+  }
+}
+
 export function hasLineOfSight(
   fromX: number,
   fromY: number,

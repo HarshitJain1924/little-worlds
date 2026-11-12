@@ -21,6 +21,11 @@ const LOCK_YAW_LIMIT = 1.0;
 /** How fast a manual lock offset relaxes back to the framing angle. */
 const LOCK_RECENTER_RATE = 0.3;
 const RECENTER_DELAY = 1.2;
+/**
+ * Recentering only follows travel within this angle of the view direction, so
+ * backpedalling (180 degrees) and strafing (90) never drag the camera around.
+ */
+const RECENTER_MAX_ANGLE = 1.0;
 
 /**
  * Third-person action camera.
@@ -192,7 +197,13 @@ export class ThirdPersonCamera {
           const travelYaw = Math.atan2(-velocity.x, -velocity.z);
           let difference = travelYaw - this.targetYaw;
           difference = Math.atan2(Math.sin(difference), Math.cos(difference));
-          this.targetYaw += difference * (1 - Math.exp(-1.6 * delta));
+
+          // Only drift in behind forward travel. Backing up or strafing points
+          // the travel vector away from the view, and following it would swing
+          // the camera around (which also flips what S means) — a spin loop.
+          if (Math.abs(difference) < RECENTER_MAX_ANGLE) {
+            this.targetYaw += difference * (1 - Math.exp(-1.6 * delta));
+          }
         }
       }
       this.boom = clamp(
@@ -202,7 +213,13 @@ export class ThirdPersonCamera {
       );
     }
 
-    this.yaw += (this.targetYaw - this.yaw) * smoothing;
+    // Interpolate through the shortest arc, so a target on the far side of the
+    // -PI / +PI seam turns one way instead of spinning all the way around.
+    const yawStep = Math.atan2(
+      Math.sin(this.targetYaw - this.yaw),
+      Math.cos(this.targetYaw - this.yaw),
+    );
+    this.yaw += yawStep * smoothing;
     this.pitch += (this.targetPitch - this.pitch) * smoothing;
 
     // Follow the character's chest, not their feet, so the head stays framed.

@@ -46,7 +46,10 @@ export class InputController {
   private zoomQueued = 0;
 
   private pointerLocked = false;
+  private lockDenied = false;
   private readonly lockSupported: boolean;
+  private touchBlock = false;
+  private tapCandidate: { x: number; y: number; time: number } | null = null;
 
   private stickId: number | null = null;
   private readonly stickOrigin = { x: 0, y: 0 };
@@ -62,6 +65,11 @@ export class InputController {
     private readonly attackButton: HTMLButtonElement | null,
     private readonly stickElement: HTMLElement | null,
     private readonly lockButton: HTMLButtonElement | null = null,
+    combatButtons: {
+      heavy?: HTMLButtonElement | null;
+      block?: HTMLButtonElement | null;
+      dodge?: HTMLButtonElement | null;
+    } = {},
   ) {
     this.lockSupported = typeof canvas.requestPointerLock === 'function';
 
@@ -88,15 +96,51 @@ export class InputController {
       event.preventDefault();
       this.lockToggleQueued = true;
     });
+
+    combatButtons.heavy?.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      this.heavyQueued = true;
+    });
+
+    combatButtons.dodge?.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      this.dodgeQueued = true;
+    });
+
+    const blockButton = combatButtons.block;
+    if (blockButton) {
+      blockButton.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        this.touchBlock = true;
+        // Capture so releasing outside the button still clears the guard.
+        try {
+          blockButton.setPointerCapture(event.pointerId);
+        } catch {
+          // Synthetic or rejected capture: the release listeners still run.
+        }
+      });
+
+      const release = (): void => {
+        this.touchBlock = false;
+      };
+      blockButton.addEventListener('pointerup', release);
+      blockButton.addEventListener('pointercancel', release);
+      blockButton.addEventListener('lostpointercapture', release);
+      blockButton.addEventListener('contextmenu', (event) => event.preventDefault());
+    }
   }
 
   get isPointerLocked(): boolean {
     return this.pointerLocked;
   }
 
-  /** True while the pointer is free, so the UI can ask for a click to resume. */
+  /**
+   * True while the pointer is free, so the UI can ask for a click to resume.
+   * Once the browser has refused pointer lock, drag-look is the control scheme
+   * and the prompt would be misleading.
+   */
   get needsCapture(): boolean {
-    return this.lockSupported && !this.pointerLocked && !this.touchCapable;
+    return this.lockSupported && !this.pointerLocked && !this.touchCapable && !this.lockDenied;
   }
 
   readMove(): MoveInput {
@@ -194,7 +238,7 @@ export class InputController {
   }
 
   isBlocking(): boolean {
-    return this.held.has('f') || this.mouseBlock || this.virtual.block;
+    return this.held.has('f') || this.mouseBlock || this.touchBlock || this.virtual.block;
   }
 
   private readonly onKeyDown = (event: KeyboardEvent): void => {
@@ -225,6 +269,8 @@ export class InputController {
   private readonly onBlur = (): void => {
     this.held.clear();
     this.mouseBlock = false;
+    this.touchBlock = false;
+    this.tapCandidate = null;
     this.stickId = null;
     this.lookId = null;
     this.touches.clear();
@@ -235,7 +281,12 @@ export class InputController {
 
   private readonly onPointerLockEvent = (): void => {
     this.pointerLocked = document.pointerLockElement === this.canvas;
-    if (!this.pointerLocked) {
+    if (this.pointerLocked) {
+      this.lockDenied = false;
+      // Pointer capture owns the view now, so drop any drag in progress.
+      this.lookId = null;
+      this.tapCandidate = null;
+    } else {
       // Releasing capture must not leave a stuck guard or movement key.
       this.mouseBlock = false;
       this.lookId = null;
@@ -244,8 +295,10 @@ export class InputController {
   };
 
   private readonly onPointerLockError = (): void => {
-    // Denied (usually a non-gesture request): drag-look stays available.
+    // Denied (usually a non-gesture request, or a sandboxed frame). Drag-look
+    // is the fallback, so stop advertising capture in the HUD.
     this.pointerLocked = false;
+    this.lockDenied = true;
     this.onPointerLockChange?.(false);
   };
 
@@ -272,23 +325,24 @@ export class InputController {
       return;
     }
 
-    // First click captures the mouse instead of attacking.
-    if (this.lockSupported) {
-      this.requestLock();
-      return;
-    }
+    if (event.button !== 0) return;
 
-    // No pointer lock available (older browsers, embedded frames): drag to look
-    // and click to attack, as before.
+    // Track the drag unconditionally: if pointer lock is unavailable or the
+    // request is denied, look control must still work immediately.
+    this.lookId = event.pointerId;
+    this.lookLast.x = event.clientX;
+    this.lookLast.y = event.clientY;
+    this.tapCandidate = { x: event.clientX, y: event.clientY, time: performance.now() };
+
     try {
       this.canvas.setPointerCapture(event.pointerId);
     } catch {
       // Synthetic pointer events reject capture; dragging still works.
     }
-    this.lookId = event.pointerId;
-    this.lookLast.x = event.clientX;
-    this.lookLast.y = event.clientY;
-    if (event.button === 0) this.attackQueued = true;
+
+    // The same click also starts a capture request; its success is what makes
+    // the drag inert a moment later.
+    if (this.lockSupported && !this.lockDenied) this.requestLock();
   };
 
   private requestLock(): void {
@@ -297,6 +351,7 @@ export class InputController {
     if (request && typeof (request as Promise<void>).catch === 'function') {
       (request as Promise<void>).catch(() => {
         this.pointerLocked = false;
+        this.lockDenied = true;
       });
     }
   }
@@ -378,6 +433,15 @@ export class InputController {
     }
 
     if (event.pointerId === this.lookId) this.lookId = null;
+
+    // A click that never became a drag attacks. The click that captured the
+    // pointer is excluded, so starting mouse-look never swings the sword.
+    const tap = this.tapCandidate;
+    this.tapCandidate = null;
+    if (tap && !this.pointerLocked) {
+      const moved = Math.hypot(event.clientX - tap.x, event.clientY - tap.y);
+      if (moved < 6 && performance.now() - tap.time < 350) this.attackQueued = true;
+    }
   };
 
   private readonly onWheel = (event: WheelEvent): void => {

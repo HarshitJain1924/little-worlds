@@ -232,6 +232,11 @@ async function boot(): Promise<void> {
     document.querySelector<HTMLButtonElement>('#attack'),
     document.querySelector<HTMLElement>('#stick'),
     document.querySelector<HTMLButtonElement>('#lock'),
+    {
+      heavy: document.querySelector<HTMLButtonElement>('#heavy'),
+      block: document.querySelector<HTMLButtonElement>('#block'),
+      dodge: document.querySelector<HTMLButtonElement>('#dodge'),
+    },
   );
 
   hud.setCaptureHint(input.needsCapture);
@@ -254,6 +259,21 @@ async function boot(): Promise<void> {
       if (distance > 0.001) {
         toEnemy.normalize();
         if (Math.acos(Math.min(1, Math.max(-1, toEnemy.dot(forward)))) > attack.arc) return false;
+      }
+
+      // A swing does not reach through a wall, pillar or trunk.
+      if (
+        !hasLineOfSight(
+          position.x,
+          position.y + 1.2,
+          position.z,
+          enemy.position.x,
+          enemy.position.y + 1.2,
+          enemy.position.z,
+          world.obstacles,
+        )
+      ) {
+        return false;
       }
 
       if (!enemy.takeDamage(attack.damage, position)) return false;
@@ -437,6 +457,11 @@ async function boot(): Promise<void> {
   });
 
   // Scripted hook for verification: drives the same input path the player uses.
+  // Development only, or a production build explicitly opened with ?debug.
+  const debugEnabled =
+    import.meta.env.DEV || new URLSearchParams(window.location.search).has('debug');
+
+  if (debugEnabled) {
   (window as unknown as { __play: unknown }).__play = {
     player,
     enemies,
@@ -622,6 +647,7 @@ async function boot(): Promise<void> {
       return canvas.toDataURL('image/png');
     },
   };
+  }
 }
 
 boot().catch((error: unknown) => {

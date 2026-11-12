@@ -282,6 +282,7 @@ export async function buildWorld(onProgress: (fraction: number, label: string) =
 
   const ruinY = heightAt(ARENA.ruin.x, ARENA.ruin.z);
 
+
   // 2 x 2 tiles of 4 units: an 8 x 8 platform that lines up with the walls.
   for (const dx of [-2, 2]) {
     for (const dz of [-2, 2]) {
@@ -291,7 +292,9 @@ export async function buildWorld(onProgress: (fraction: number, label: string) =
     }
   }
 
-  const wallY = ruinY + 2;
+  // Every dungeon module is authored with its origin at its base, so the wall
+  // sits on the floor tile surface (tile top ≈ +0.13), not two units above it.
+  const wallY = ruinY + 0.13;
   const walls: [number, number, number][] = [
     [ARENA.ruin.x, ARENA.ruin.z - 4, 0],
     [ARENA.ruin.x - 4, ARENA.ruin.z, Math.PI / 2],
@@ -317,8 +320,13 @@ export async function buildWorld(onProgress: (fraction: number, label: string) =
   for (const dx of [-3.1, 3.1]) {
     const x = ARENA.ruin.x + dx;
     const z = ARENA.ruin.z + 4.6;
-    group.add(placeModel(pillarGltf, x, ruinY, z, 0, 1));
-    group.add(placeModel(torchGltf, x, ruinY + 2.55, z, 0, 1));
+    // These stand outside the tiled platform, on their own patch of ground.
+    const pillarY = heightAt(x, z);
+    group.add(placeModel(pillarGltf, x, pillarY, z, 0, 1));
+    // The torch is a 1.1m sconce: pull it off the pillar axis and onto the face
+    // that looks into the doorway, and hang it at chest-and-a-half height.
+    const torchX = ARENA.ruin.x + dx * 0.82;
+    group.add(placeModel(torchGltf, torchX, pillarY + 2.4, z, 0, 1));
     blockers.push({ minX: x - 0.6, maxX: x + 0.6, minZ: z - 0.6, maxZ: z + 0.6 });
     obstacles.push({
       kind: 'box',
@@ -326,12 +334,12 @@ export async function buildWorld(onProgress: (fraction: number, label: string) =
       maxX: x + 0.6,
       minZ: z - 0.6,
       maxZ: z + 0.6,
-      bottom: ruinY,
-      top: ruinY + 4.2,
+      bottom: pillarY,
+      top: pillarY + 4.2,
     });
 
     const light = new THREE.PointLight(0xffb268, 8, 13, 2);
-    light.position.set(x, ruinY + 3.1, z);
+    light.position.set(torchX, pillarY + 2.9, z);
     group.add(light);
   }
 

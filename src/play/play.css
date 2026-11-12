@@ -155,6 +155,7 @@ html, body {
   pointer-events: auto;
   display: none;
   backdrop-filter: blur(6px);
+  touch-action: none;
 }
 
 #attack:active { background: rgba(120, 46, 36, 0.7); }
@@ -228,24 +229,38 @@ html, body {
   box-shadow: 0 0 12px rgba(255, 180, 100, 0.55);
 }
 
-#lock {
+/* Touch combat cluster: one thumb-sized button per action, stacked beside the
+   attack button so the centre of the view stays clear. */
+#lock,
+#heavy,
+#block,
+#dodge {
   position: absolute;
-  right: calc(34px + env(safe-area-inset-right));
-  bottom: calc(116px + env(safe-area-inset-bottom));
   width: 54px;
   height: 54px;
   border-radius: 50%;
   border: 1px solid rgba(190, 220, 255, 0.4);
   background: rgba(12, 22, 38, 0.55);
   color: #d6e6ff;
-  font-size: 20px;
+  font-size: 19px;
   line-height: 1;
   pointer-events: auto;
   display: none;
   backdrop-filter: blur(6px);
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
-#lock:active { background: rgba(52, 82, 130, 0.7); }
+#lock:active,
+#heavy:active,
+#block:active,
+#dodge:active { background: rgba(52, 82, 130, 0.7); }
+
+#lock { right: calc(20px + env(safe-area-inset-right)); bottom: calc(112px + env(safe-area-inset-bottom)); }
+#heavy { right: calc(106px + env(safe-area-inset-right)); bottom: calc(32px + env(safe-area-inset-bottom)); }
+#dodge { right: calc(106px + env(safe-area-inset-right)); bottom: calc(94px + env(safe-area-inset-bottom)); }
+#block { right: calc(106px + env(safe-area-inset-right)); bottom: calc(156px + env(safe-area-inset-bottom)); }
 
 #capture {
   position: absolute;
@@ -358,8 +373,11 @@ html, body {
 }
 
 @media (pointer: coarse) {
-  #attack { display: block; }
-  #lock { display: block; }
+  #attack,
+  #lock,
+  #heavy,
+  #block,
+  #dodge { display: block; }
   #hint, #capture { display: none !important; }
   #vitals { width: 46vw; bottom: calc(120px + env(safe-area-inset-bottom)); }
   #stats { font-size: 10px; }

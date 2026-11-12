@@ -202,6 +202,36 @@ test('locked camera frames the player from behind toward the target', () => {
   assert.ok(forward.z > 0.95, `forward ${forward.toArray().join(',')}`);
 });
 
+test('backpedalling never recenters the camera behind the player', () => {
+  const camera = new ThirdPersonCamera(1.6, { heightAt: () => 0 });
+  const player = new THREE.Vector3(0, 0, 0);
+
+  camera.snap(0, 0.32);
+  const startYaw = camera.yaw;
+
+  // At yaw 0 the camera looks along -z, so +z velocity is walking backwards.
+  // Following that travel would point the camera into its own view and loop.
+  for (let i = 0; i < 240; i += 1) camera.update(1 / 60, player, { x: 0, z: 1 });
+
+  assert.ok(
+    Math.abs(camera.yaw - startYaw) < 0.01,
+    `backpedalling rotated the camera to ${camera.yaw.toFixed(3)}`,
+  );
+  assert.ok(Math.abs(camera.targetYaw - startYaw) < 0.01, 'target yaw drifted too');
+});
+
+test('recentering still follows forward/ diagonal travel', () => {
+  const camera = new ThirdPersonCamera(1.6, { heightAt: () => 0 });
+  const player = new THREE.Vector3(0, 0, 0);
+
+  camera.snap(0, 0.32);
+
+  // 45 degrees off the view direction, inside the recenter cone.
+  for (let i = 0; i < 240; i += 1) camera.update(1 / 60, player, { x: 0.7, z: -0.7 });
+
+  assert.ok(camera.yaw < -0.2, `expected the camera to drift, got ${camera.yaw.toFixed(3)}`);
+});
+
 test('wheel zoom stays inside its limits', () => {
   const camera = new ThirdPersonCamera(1.6, { heightAt: () => 0 });
   const player = new THREE.Vector3(0, 0, 0);

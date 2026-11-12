@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { CharacterRig } from './character';
+import { hasLineOfSight, resolveBlockers } from './collision';
 import type { World } from './world';
 import { ARENA } from './world';
 
@@ -22,6 +23,9 @@ export type EnemyState = 'idle' | 'chase' | 'attack' | 'hurt' | 'dead';
 const DEFAULT_ATTACK_CLIP = 'Melee_1H_Attack_Slice_Diagonal';
 const DEFAULT_ATTACK_STRIKE = 0.4;
 const PATROL_RADIUS = 5;
+const BODY_RADIUS = 0.45;
+/** Chest height used for attack line-of-sight checks. */
+const CHEST = 1.2;
 
 export class Enemy {
   readonly rig: CharacterRig;
@@ -132,7 +136,19 @@ export class Enemy {
             const inFront =
               distance < 0.001 ||
               (this.toPlayer.x * forwardX + this.toPlayer.z * forwardZ) / distance > 0;
-            if (distance < this.config.attackRange + 0.55 && inFront && playerAlive) {
+            // A wall or trunk between the two stops the blow, exactly like it
+            // stops the camera and target selection.
+            const clear = hasLineOfSight(
+              this.position.x,
+              this.position.y + CHEST,
+              this.position.z,
+              playerPosition.x,
+              playerPosition.y + CHEST,
+              playerPosition.z,
+              this.world.obstacles,
+            );
+
+            if (distance < this.config.attackRange + 0.55 && inFront && playerAlive && clear) {
               this.onHitPlayer?.(this.config.damage, this.position);
             }
           }
@@ -235,6 +251,10 @@ export class Enemy {
 
     this.direction.normalize();
     this.position.addScaledVector(this.direction, speed * delta);
+
+    // Enemies are pushed out of walls and pillars by the same helper as the
+    // player, so neither can occupy solid geometry.
+    resolveBlockers(this.position, this.world.blockers, BODY_RADIUS);
     this.position.y = this.world.heightAt(this.position.x, this.position.z);
     this.speed = speed;
 

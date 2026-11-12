@@ -4,7 +4,8 @@ import type { DodgeMotion } from './models';
 import { DODGE_MOTION } from './models';
 import type { ThirdPersonCamera } from './camera';
 import type { InputController } from './input';
-import type { Blocker, World } from './world';
+import { resolveBlockers } from './collision';
+import type { World } from './world';
 import { ARENA } from './world';
 
 /**
@@ -100,31 +101,6 @@ function sampleMotion(values: number[], times: number[], time: number): number {
   }
 
   return values[last];
-}
-
-function pushOutOfBlockers(position: THREE.Vector3, blockers: Blocker[], radius: number): void {
-  for (const blocker of blockers) {
-    if (
-      position.x < blocker.minX - radius ||
-      position.x > blocker.maxX + radius ||
-      position.z < blocker.minZ - radius ||
-      position.z > blocker.maxZ + radius
-    ) {
-      continue;
-    }
-
-    // Push along whichever axis offers the shallowest escape.
-    const left = position.x - (blocker.minX - radius);
-    const right = blocker.maxX + radius - position.x;
-    const back = position.z - (blocker.minZ - radius);
-    const front = blocker.maxZ + radius - position.z;
-    const smallest = Math.min(left, right, back, front);
-
-    if (smallest === left) position.x = blocker.minX - radius;
-    else if (smallest === right) position.x = blocker.maxX + radius;
-    else if (smallest === back) position.z = blocker.minZ - radius;
-    else position.z = blocker.maxZ + radius;
-  }
 }
 
 export class Player {
@@ -304,7 +280,7 @@ export class Player {
 
     this.applyGroundAndGravity(delta);
     this.clampToArena();
-    pushOutOfBlockers(this.position, this.world.blockers, BODY_RADIUS);
+    resolveBlockers(this.position, this.world.blockers, BODY_RADIUS);
 
     this.updateAttack(delta);
     this.updateDodge(delta);
