@@ -1,0 +1,258 @@
+:root {
+  color-scheme: dark;
+  --ink: #eaf2ff;
+  --panel: rgba(9, 15, 28, 0.66);
+  --line: rgba(158, 196, 255, 0.18);
+  --hp: linear-gradient(90deg, #ff6b6b, #ff9770);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #0d1730;
+  color: var(--ink);
+  -webkit-tap-highlight-color: transparent;
+}
+
+#scene {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: none;
+  cursor: grab;
+}
+
+#scene:active { cursor: grabbing; }
+
+#hud { position: fixed; inset: 0; pointer-events: none; }
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  backdrop-filter: blur(8px);
+}
+
+#stats {
+  position: absolute;
+  top: calc(10px + env(safe-area-inset-top));
+  right: calc(10px + env(safe-area-inset-right));
+  padding: 7px 9px;
+  font: 500 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre;
+  opacity: 0.9;
+}
+
+#objective {
+  position: absolute;
+  top: calc(10px + env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 7px 14px;
+  font: 600 11px/1 ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: #cfe0ff;
+}
+
+#vitals {
+  position: absolute;
+  left: calc(16px + env(safe-area-inset-left));
+  bottom: calc(18px + env(safe-area-inset-bottom));
+  width: min(280px, 42vw);
+  padding: 10px 12px 12px;
+}
+
+#vitals .name {
+  margin: 0 0 7px;
+  font: 600 10px/1 ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #9fb6da;
+}
+
+#vitals .bar,
+.enemy-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+
+#vitals .bar span {
+  display: block;
+  height: 100%;
+  width: 100%;
+  border-radius: 4px;
+  background: var(--hp);
+  transform-origin: left center;
+  transition: transform 160ms ease;
+}
+
+#enemy-bars { position: absolute; inset: 0; }
+
+.enemy-bar {
+  position: absolute;
+  width: 52px;
+  height: 5px;
+  margin-left: -26px;
+  margin-top: -6px;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  background: rgba(8, 12, 20, 0.6);
+  transition: opacity 120ms ease;
+}
+
+.enemy-bar span {
+  display: block;
+  height: 100%;
+  width: 100%;
+  background: linear-gradient(90deg, #ffd166, #ff7b54);
+  transform-origin: left center;
+}
+
+#stick {
+  position: fixed;
+  width: 112px;
+  height: 112px;
+  margin: -56px 0 0 -56px;
+  border-radius: 50%;
+  border: 1px solid rgba(190, 220, 255, 0.28);
+  background: rgba(12, 20, 36, 0.35);
+  pointer-events: none;
+}
+
+#stick-knob {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 46px;
+  height: 46px;
+  margin: -23px 0 0 -23px;
+  border-radius: 50%;
+  background: rgba(175, 210, 255, 0.42);
+  border: 1px solid rgba(220, 240, 255, 0.5);
+}
+
+#attack {
+  position: absolute;
+  right: calc(24px + env(safe-area-inset-right));
+  bottom: calc(30px + env(safe-area-inset-bottom));
+  width: 74px;
+  height: 74px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 190, 160, 0.45);
+  background: rgba(46, 22, 20, 0.55);
+  color: #ffd9c8;
+  font-size: 26px;
+  line-height: 1;
+  pointer-events: auto;
+  display: none;
+  backdrop-filter: blur(6px);
+}
+
+#attack:active { background: rgba(120, 46, 36, 0.7); }
+
+#hint {
+  position: absolute;
+  left: 50%;
+  bottom: calc(20px + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  margin: 0;
+  font: 400 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: rgba(210, 226, 250, 0.5);
+  white-space: nowrap;
+}
+
+#flash {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  background: radial-gradient(120% 100% at 50% 50%, rgba(200, 30, 20, 0) 45%, rgba(200, 30, 20, 0.55) 100%);
+  transition: opacity 90ms ease;
+}
+
+#banner {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(6, 9, 16, 0.55);
+  pointer-events: none;
+}
+
+/* The hidden attribute must win over the display rule above. */
+#banner[hidden] { display: none; }
+#stick[hidden] { display: none; }
+
+#banner p {
+  margin: 0;
+  font: 600 22px/1.3 ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  text-align: center;
+  color: #ffe8d6;
+  text-shadow: 0 2px 18px rgba(0, 0, 0, 0.6);
+}
+
+#loading {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: radial-gradient(120% 90% at 50% 30%, #1b2c52 0%, #0b1224 70%);
+  transition: opacity 420ms ease;
+  z-index: 10;
+}
+
+#loading.is-hidden { opacity: 0; pointer-events: none; }
+
+.loading-inner { width: min(260px, 70vw); text-align: center; }
+
+.loading-title {
+  margin: 0 0 14px;
+  font: 600 15px/1 ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  opacity: 0.85;
+}
+
+.loading-bar {
+  height: 3px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.14);
+  overflow: hidden;
+}
+
+#loading-fill {
+  display: block;
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #6ee7d0, #9fc4ff);
+  transition: width 160ms ease;
+}
+
+#loading-label {
+  margin: 12px 0 0;
+  font: 400 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  opacity: 0.5;
+}
+
+@media (pointer: coarse) {
+  #attack { display: block; }
+  #hint { display: none; }
+  #vitals { width: 46vw; bottom: calc(120px + env(safe-area-inset-bottom)); }
+  #stats { font-size: 10px; }
+}
+
+/* The control hint would sit under the vitals panel on narrower windows. */
+@media (max-width: 1100px) {
+  #hint { display: none; }
+}

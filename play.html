@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#0d1730" />
+    <title>Little Worlds — First Playable</title>
+  </head>
+  <body>
+    <canvas id="scene" aria-label="Third-person action RPG prototype"></canvas>
+
+    <div id="hud">
+      <div id="stats" class="panel"></div>
+      <div id="objective" class="panel">Reach the ruin · defeat the skeletons</div>
+
+      <div id="vitals" class="panel">
+        <p class="name">Knight</p>
+        <div class="bar"><span id="hp-fill"></span></div>
+      </div>
+
+      <div id="enemy-bars"></div>
+
+      <div id="stick" hidden><span id="stick-knob"></span></div>
+      <button id="attack" type="button" aria-label="Attack">⚔</button>
+
+      <p id="hint">WASD move · Shift run · Space jump · J / click attack · drag to look</p>
+
+      <div id="flash"></div>
+      <div id="banner" hidden><p></p></div>
+    </div>
+
+    <div id="loading">
+      <div class="loading-inner">
+        <p class="loading-title">Little Worlds</p>
+        <div class="loading-bar"><span id="loading-fill"></span></div>
+        <p id="loading-label">entering the wood…</p>
+      </div>
+    </div>
+
+    <script type="module" src="/src/play/main.ts"></script>
+  </body>
+</html>

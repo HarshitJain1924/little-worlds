@@ -3,9 +3,17 @@ dist/
 .vite/
 
 # Original downloaded asset packs — kept locally as the untouched source of truth.
-# Only the selected runtime GLBs are committed under public/models/.
+# Only the selected runtime models are committed under public/models/ and public/rpg/.
 kenney_nature-kit/
 kenney_fantasy-town-kit_2.0/
+KayKit_Adventurers_2.0_FREE/
+KayKit_Dungeon_Pack_1.1_FREE/
+KayKit_FantasyWeaponsBits_1.0_FREE/
+KayKit_Forest_Nature_Pack_1.0_FREE/
+KayKit_RPGToolsBits_1.0_FREE/
+KayKit_ResourceBits_1.0_FREE/
+KayKit_Skeletons_1.1_FREE/
+gobkit-animal-pack/
 
 # local dev logs
 preview.log

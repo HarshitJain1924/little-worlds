@@ -1,0 +1,263 @@
+import * as THREE from 'three';
+import type { CharacterRig } from './character';
+import type { World } from './world';
+import { ARENA } from './world';
+
+export interface EnemyConfig {
+  label: string;
+  maxHealth: number;
+  speed: number;
+  damage: number;
+  aggroRadius: number;
+  attackRange: number;
+  attackCooldown: number;
+}
+
+export type EnemyState = 'idle' | 'chase' | 'attack' | 'hurt' | 'dead';
+
+const ATTACK_WINDUP = 0.3;
+const ATTACK_LAND = 0.36;
+const ATTACK_RECOVER = 0.82;
+const PATROL_RADIUS = 5;
+
+export class Enemy {
+  readonly rig: CharacterRig;
+  readonly position = new THREE.Vector3();
+  readonly config: EnemyConfig;
+
+  health: number;
+  state: EnemyState = 'idle';
+  alive = true;
+
+  onHitPlayer: ((damage: number, from: THREE.Vector3) => void) | null = null;
+
+  private readonly home = new THREE.Vector3();
+  private readonly patrolTarget = new THREE.Vector3();
+  private readonly direction = new THREE.Vector3();
+  private readonly toPlayer = new THREE.Vector3();
+
+  private yaw = 0;
+  private stateTimer = 0;
+  private patrolTimer = 0;
+  private cooldown = 0;
+  private hurtTimer = 0;
+  private attackLanded = false;
+  private speed = 0;
+
+  constructor(
+    rig: CharacterRig,
+    config: EnemyConfig,
+    spawn: { x: number; z: number },
+    private readonly world: World,
+  ) {
+    this.rig = rig;
+    this.config = config;
+    this.health = config.maxHealth;
+
+    this.home.set(spawn.x, world.heightAt(spawn.x, spawn.z), spawn.z);
+    this.position.copy(this.home);
+    this.patrolTarget.copy(this.home);
+    this.yaw = Math.PI;
+    this.rig.root.position.copy(this.position);
+    this.rig.root.rotation.y = this.yaw;
+  }
+
+  get isTargetable(): boolean {
+    return this.alive && this.state !== 'dead';
+  }
+
+  update(delta: number, playerPosition: THREE.Vector3, playerAlive: boolean): void {
+    if (!this.alive) {
+      this.rig.update(delta);
+      return;
+    }
+
+    this.cooldown = Math.max(0, this.cooldown - delta);
+    this.toPlayer.copy(playerPosition).sub(this.position).setY(0);
+    const distance = this.toPlayer.length();
+
+    if (this.hurtTimer > 0) {
+      this.hurtTimer -= delta;
+      this.stateTimer += delta;
+      if (this.hurtTimer <= 0) this.state = 'chase';
+    } else {
+      switch (this.state) {
+        case 'idle':
+          if (playerAlive && distance < this.config.aggroRadius) {
+            this.state = 'chase';
+            this.stateTimer = 0;
+          } else {
+            this.patrol(delta);
+          }
+          break;
+
+        case 'chase':
+          if (!playerAlive) {
+            this.state = 'idle';
+            break;
+          }
+          if (distance < this.config.attackRange && this.cooldown <= 0) {
+            this.state = 'attack';
+            this.stateTimer = 0;
+            this.attackLanded = false;
+            this.rig.animator.play('Idle_A', { fade: 0.12 });
+          } else {
+            this.moveToward(playerPosition, this.config.speed, delta);
+          }
+          break;
+
+        case 'attack':
+          this.stateTimer += delta;
+          if (this.stateTimer > ATTACK_WINDUP) this.face(playerPosition, delta, 10);
+          this.rig.animator.setSwingPhase(Math.min(1, this.stateTimer / ATTACK_RECOVER));
+
+          if (!this.attackLanded && this.stateTimer >= ATTACK_LAND) {
+            this.attackLanded = true;
+            // Re-check the range at the moment of impact, not at windup.
+            if (distance < this.config.attackRange + 0.55 && playerAlive) {
+              this.onHitPlayer?.(this.config.damage, this.position);
+            }
+          }
+
+          if (this.stateTimer >= ATTACK_RECOVER) {
+            this.rig.animator.setSwingPhase(null);
+            this.cooldown = this.config.attackCooldown;
+            this.state = 'chase';
+            this.stateTimer = 0;
+          }
+          break;
+
+        default:
+          break;
+      }
+    }
+
+    if (this.state === 'chase') this.face(playerPosition, delta, 8);
+
+    this.updateAnimation();
+
+    this.rig.root.position.copy(this.position);
+    this.rig.root.rotation.y = this.yaw;
+    this.rig.update(delta);
+  }
+
+  takeDamage(amount: number, from: THREE.Vector3): boolean {
+    if (!this.alive) return false;
+
+    this.health = Math.max(0, this.health - amount);
+    this.rig.flash(0.16, 1);
+
+    const knockback = this.position.clone().sub(from).setY(0);
+    if (knockback.lengthSq() > 0.0001) {
+      knockback.normalize().multiplyScalar(1.5);
+      this.position.add(knockback);
+      this.position.y = this.world.heightAt(this.position.x, this.position.z);
+    }
+
+    if (this.health <= 0) {
+      this.die();
+      return true;
+    }
+
+    this.state = 'hurt';
+    this.hurtTimer = 0.32;
+    this.stateTimer = 0;
+    this.rig.animator.setSwingPhase(null);
+    this.rig.animator.play('Hit_A', { once: true, fade: 0.06, clamp: true });
+    return true;
+  }
+
+  reset(): void {
+    this.alive = true;
+    this.health = this.config.maxHealth;
+    this.state = 'idle';
+    this.stateTimer = 0;
+    this.cooldown = 0;
+    this.hurtTimer = 0;
+    this.attackLanded = false;
+    this.position.copy(this.home);
+    this.yaw = Math.PI;
+    this.rig.animator.setSwingPhase(null);
+    this.rig.animator.play('Idle_A', { fade: 0.1 });
+    this.rig.root.position.copy(this.position);
+    this.rig.root.rotation.y = this.yaw;
+  }
+
+  private die(): void {
+    this.alive = false;
+    this.state = 'dead';
+    this.rig.animator.setSwingPhase(null);
+    this.rig.animator.play('Death_A', { once: true, fade: 0.1, clamp: true });
+  }
+
+  private patrol(delta: number): void {
+    this.patrolTimer -= delta;
+    if (this.patrolTimer <= 0) {
+      this.patrolTimer = 3 + Math.random() * 3;
+      const angle = Math.random() * Math.PI * 2;
+      const radius = Math.random() * PATROL_RADIUS;
+      this.patrolTarget.set(
+        this.home.x + Math.cos(angle) * radius,
+        0,
+        this.home.z + Math.sin(angle) * radius,
+      );
+    }
+
+    this.moveToward(this.patrolTarget, this.config.speed * 0.35, delta);
+    if (this.speed > 0.05) this.face(this.patrolTarget, delta, 6);
+  }
+
+  private moveToward(target: THREE.Vector3, speed: number, delta: number): void {
+    this.direction.copy(target).sub(this.position).setY(0);
+    const distance = this.direction.length();
+
+    // Stop a body-width short so enemies cannot stand inside the player.
+    const stopAt = target === this.patrolTarget ? 0.4 : 1.5;
+    if (distance <= stopAt) {
+      this.speed = 0;
+      return;
+    }
+
+    this.direction.normalize();
+    this.position.addScaledVector(this.direction, speed * delta);
+    this.position.y = this.world.heightAt(this.position.x, this.position.z);
+    this.speed = speed;
+
+    const limit = ARENA.radius - 2;
+    const radial = Math.hypot(this.position.x, this.position.z);
+    if (radial > limit) {
+      this.position.x *= limit / radial;
+      this.position.z *= limit / radial;
+    }
+  }
+
+  private face(target: THREE.Vector3, delta: number, rate: number): void {
+    const dx = target.x - this.position.x;
+    const dz = target.z - this.position.z;
+    if (Math.hypot(dx, dz) < 0.01) return;
+
+    const targetYaw = Math.atan2(dx, dz);
+    let difference = targetYaw - this.yaw;
+    difference = Math.atan2(Math.sin(difference), Math.cos(difference));
+    this.yaw += difference * (1 - Math.exp(-rate * delta));
+  }
+
+  private updateAnimation(): void {
+    if (this.state === 'chase' && this.speed > 0.1) {
+      this.rig.animator.play(this.speed > 2 ? 'Running_A' : 'Walking_A', {
+        fade: 0.18,
+        timeScale: Math.max(0.8, this.speed / 2.4),
+      });
+      return;
+    }
+
+    if (this.state === 'attack' || this.state === 'hurt') return;
+
+    if (this.state === 'idle' && this.speed > 0.05) {
+      this.rig.animator.play('Walking_A', { fade: 0.2, timeScale: 0.7 });
+      return;
+    }
+
+    this.rig.animator.play('Idle_A', { fade: 0.25 });
+  }
+}
