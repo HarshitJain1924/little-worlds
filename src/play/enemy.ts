@@ -40,8 +40,12 @@ export class Enemy {
 
   private readonly home = new THREE.Vector3();
   private readonly patrolTarget = new THREE.Vector3();
+  private readonly chaseTarget = new THREE.Vector3();
   private readonly direction = new THREE.Vector3();
   private readonly toPlayer = new THREE.Vector3();
+
+  /** Which side this skeleton prefers to circle on, so a pair does not stack. */
+  private readonly flankSign: number;
 
   private yaw = 0;
   private stateTimer = 0;
@@ -65,12 +69,27 @@ export class Enemy {
     this.position.copy(this.home);
     this.patrolTarget.copy(this.home);
     this.yaw = Math.PI;
+    this.flankSign = (Math.random() < 0.5 ? -1 : 1) * (0.6 + Math.random() * 0.6);
     this.rig.root.position.copy(this.position);
     this.rig.root.rotation.y = this.yaw;
   }
 
   get isTargetable(): boolean {
     return this.alive && this.state !== 'dead';
+  }
+
+  /** True between committing to a swing and the blow actually landing. */
+  get isWindingUp(): boolean {
+    return this.state === 'attack' && !this.attackLanded;
+  }
+
+  /** 0 at the start of the wind-up, 1 at the strike — drives the ground telegraph. */
+  get windupProgress(): number {
+    if (this.state !== 'attack') return 0;
+
+    const timeScale = this.config.attackTimeScale ?? 1;
+    const strikeAt = Math.max(0.05, (this.config.attackStrike ?? DEFAULT_ATTACK_STRIKE) / timeScale);
+    return Math.min(1, this.stateTimer / strikeAt);
   }
 
   update(delta: number, playerPosition: THREE.Vector3, playerAlive: boolean): void {
@@ -114,7 +133,16 @@ export class Enemy {
               clamp: true,
             });
           } else {
-            this.moveToward(playerPosition, this.config.speed, delta);
+            // Approach on a shallow arc rather than a dead-straight line, so two
+            // skeletons do not stack on the same track into the player's back.
+            this.chaseTarget.copy(playerPosition);
+            if (distance > this.config.attackRange + 1.4 && distance > 0.001) {
+              const nx = this.toPlayer.x / distance;
+              const nz = this.toPlayer.z / distance;
+              this.chaseTarget.x += -nz * this.flankSign * 1.2;
+              this.chaseTarget.z += nx * this.flankSign * 1.2;
+            }
+            this.moveToward(this.chaseTarget, this.config.speed, delta);
           }
           break;
 
@@ -154,7 +182,9 @@ export class Enemy {
           }
 
           if (this.stateTimer >= duration) {
-            this.cooldown = this.config.attackCooldown;
+            // Jittered recovery so a group does not swing in lockstep, and the
+            // gap between attacks stays readable.
+            this.cooldown = this.config.attackCooldown * (0.9 + Math.random() * 0.35);
             this.state = 'chase';
             this.stateTimer = 0;
           }
@@ -279,9 +309,25 @@ export class Enemy {
 
   private updateAnimation(): void {
     if (this.state === 'chase' && this.speed > 0.1) {
+      const timeScale = Math.max(0.8, this.speed / 2.4);
+
+      // They face the player while circling, so the legs travel sideways;
+      // the pack's strafe run reads far better there than a forward walk.
+      const forwardDot =
+        Math.sin(this.yaw) * this.direction.x + Math.cos(this.yaw) * this.direction.z;
+      if (this.speed > 1.2 && forwardDot < 0.55) {
+        const rightDot =
+          -Math.cos(this.yaw) * this.direction.x + Math.sin(this.yaw) * this.direction.z;
+        this.rig.animator.play(rightDot >= 0 ? 'Running_Strafe_Right' : 'Running_Strafe_Left', {
+          fade: 0.18,
+          timeScale,
+        });
+        return;
+      }
+
       this.rig.animator.play(this.speed > 2 ? 'Running_A' : 'Walking_A', {
         fade: 0.18,
-        timeScale: Math.max(0.8, this.speed / 2.4),
+        timeScale,
       });
       return;
     }

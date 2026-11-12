@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import type { CharacterRig } from './character';
 import type { DodgeMotion } from './models';
-import { DODGE_MOTION } from './models';
+import { DODGE_MOTION, findBone } from './models';
 import type { ThirdPersonCamera } from './camera';
 import type { InputController } from './input';
 import { resolveBlockers } from './collision';
@@ -112,6 +112,13 @@ export class Player {
   yaw = Math.PI;
   alive = true;
 
+  /** Fired the moment a swing starts, before any damage can land. */
+  onAttackStart: ((attack: AttackProfile) => void) | null = null;
+  /** Fired the moment a dodge begins. */
+  onDodgeStart: (() => void) | null = null;
+  /** Fired when the character touches the ground after a real jump. */
+  onLand: (() => void) | null = null;
+
   /** Fired during the active swing window; hitTargets prevents multi-hitting one enemy. */
   onAttackHit:
     | ((position: THREE.Vector3, forward: THREE.Vector3, attack: AttackProfile, hitTargets: Set<object>) => void)
@@ -138,10 +145,13 @@ export class Player {
   private dodgeDuration: number = DODGE.duration;
   private dodgeCooldown = 0;
   private dodgeBuffer = 0;
+  private attackBuffer = 0;
+  private queuedAttack: AttackProfile | null = null;
   private dodgeClip: string | null = null;
   private dodgeMotion: DodgeMotion | null = null;
   private invulnerable = 0;
   private lockTarget: { x: number; z: number } | null = null;
+  private handSlot: THREE.Object3D | null | undefined;
 
   constructor(
     rig: CharacterRig,
@@ -193,6 +203,20 @@ export class Player {
     return out.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
   }
 
+  /**
+   * World position of the weapon hand, sampled after the skeleton has been
+   * posed. Used by the slash flipbook so the arc travels with the blade instead
+   * of sitting at a fixed offset.
+   */
+  weaponHand(out: THREE.Vector3): void {
+    if (this.handSlot === undefined) {
+      this.handSlot = findBone(this.rig.root, 'handslot.r') ?? null;
+    }
+
+    if (this.handSlot) this.handSlot.getWorldPosition(out);
+    else out.copy(this.position).setY(this.position.y + 1.1);
+  }
+
   update(delta: number, input: InputController, camera: ThirdPersonCamera): void {
     this.cooldown = Math.max(0, this.cooldown - delta);
     this.lockTimer = Math.max(0, this.lockTimer - delta);
@@ -220,8 +244,17 @@ export class Player {
     // Buffer the dodge briefly so a press during recovery is not swallowed.
     if (input.takeDodge()) this.dodgeBuffer = 0.3;
     this.dodgeBuffer = Math.max(0, this.dodgeBuffer - delta);
-    const wantsHeavy = input.takeHeavy();
-    const wantsAttack = input.takeAttack();
+    // Attacks buffer briefly too, so a press during recovery or cooldown is not
+    // dropped — it becomes the next swing instead of being swallowed.
+    if (input.takeHeavy()) {
+      this.queuedAttack = ATTACKS.heavy;
+      this.attackBuffer = 0.22;
+    } else if (input.takeAttack()) {
+      this.queuedAttack = ATTACKS.light;
+      this.attackBuffer = 0.22;
+    }
+    this.attackBuffer = Math.max(0, this.attackBuffer - delta);
+    if (this.attackBuffer === 0) this.queuedAttack = null;
 
     if (this.grounded && wantsJump && this.lockTimer <= 0 && !this.isAttacking && !this.dodging) {
       this.grounded = false;
@@ -236,9 +269,11 @@ export class Player {
       this.startDodge();
     }
 
-    if (this.canStartAttack()) {
-      if (wantsHeavy) this.startAttack(ATTACKS.heavy, forward);
-      else if (wantsAttack) this.startAttack(ATTACKS.light, forward);
+    if (this.queuedAttack && this.canStartAttack()) {
+      const profile = this.queuedAttack;
+      this.queuedAttack = null;
+      this.attackBuffer = 0;
+      this.startAttack(profile, forward);
     }
 
     if (this.dodging) {
@@ -349,6 +384,8 @@ export class Player {
     this.dodgeTime = 0;
     this.dodgeCooldown = 0;
     this.dodgeBuffer = 0;
+    this.attackBuffer = 0;
+    this.queuedAttack = null;
     this.dodgeClip = null;
     this.dodgeMotion = null;
     this.invulnerable = 0;
@@ -407,6 +444,8 @@ export class Player {
       timeScale: profile.timeScale,
       clamp: true,
     });
+
+    this.onAttackStart?.(profile);
   }
 
   private startDodge(): void {
@@ -449,6 +488,8 @@ export class Player {
       clamp: true,
       timeScale: DODGE.timeScale,
     });
+
+    this.onDodgeStart?.();
   }
 
   /**
@@ -522,6 +563,8 @@ export class Player {
       this.verticalSpeed = 0;
       this.rig.animator.play('Jump_Land', { once: true, fade: 0.08, clamp: true });
       this.lockTimer = 0.14;
+      // Ground contact after a real fall, not a one-frame step.
+      if (this.airTime > 0.12) this.onLand?.();
       return;
     }
 

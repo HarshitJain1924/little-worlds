@@ -4,7 +4,10 @@ import { ThirdPersonCamera } from './camera';
 import type { WeaponSpec } from './character';
 import { CharacterRig, SOCKETS, weaponFrom } from './character';
 import { hasLineOfSight } from './collision';
+import { CombatEffects } from './effects';
 import { InputController } from './input';
+import { Sfx } from './sfx';
+import { CombatVfx } from './vfx';
 import { ASSETS, loadClipSet, loadModel } from './models';
 import { Player } from './player';
 import type { EnemyConfig } from './enemy';
@@ -144,6 +147,9 @@ async function boot(): Promise<void> {
 
   scene.add(new THREE.HemisphereLight(0xcfe2ff, 0x6f7f52, 1.7));
 
+  const effects = new CombatEffects(scene);
+  const sfx = new Sfx();
+
   progress(0.04, 'shaping the ground…');
 
   const [world, clips, knightGltf, minionGltf, warriorGltf, swordGltf, shieldGltf, bladeGltf, axeGltf, largeShieldGltf] =
@@ -176,6 +182,11 @@ async function boot(): Promise<void> {
   scene.add(playerRig.root);
 
   const player = new Player(playerRig, world);
+
+  // Flipbook VFX. Quality decides which pools exist at all; low never loads a
+  // sheet, so the lightweight rings in CombatEffects carry that tier alone.
+  const vfx = new CombatVfx(scene, (out) => player.weaponHand(out));
+  vfx.setQuality(quality);
 
   const cameraRig = new ThirdPersonCamera(window.innerWidth / window.innerHeight, {
     obstacles: world.obstacles,
@@ -246,6 +257,34 @@ async function boot(): Promise<void> {
   const scratchForward = new THREE.Vector3();
   const scratchFacing = new THREE.Vector3();
 
+  /** Seconds of slowed world time left from the last landed blow. */
+  let hitStopTimer = 0;
+
+  /**
+   * The slash sheet peaks at frame 8, i.e. 0.1 s after its first played frame,
+   * so it is scheduled to start that much before the authored strike time and
+   * its brightest frame lands on the frame the damage can connect.
+   */
+  const SLASH_LEAD = 0.1;
+  let slashPending: { remaining: number; kind: 'slashLight' | 'slashHeavy'; clip: string } | null = null;
+
+  player.onAttackStart = (attack) => {
+    const heavy = attack.damage >= 40;
+    sfx.swing(heavy);
+    slashPending = {
+      remaining: Math.max(0, attack.hitStart / attack.timeScale - SLASH_LEAD),
+      kind: heavy ? 'slashHeavy' : 'slashLight',
+      clip: attack.clip,
+    };
+  };
+
+  player.onDodgeStart = () => {
+    sfx.dodge();
+    vfx.spawn('dodgeDust', player.position, player.yaw);
+  };
+
+  player.onLand = () => vfx.spawn('landing', player.position, player.yaw);
+
   player.onAttackHit = (position, forward, attack, hitTargets) => {
     let hits = 0;
 
@@ -279,6 +318,16 @@ async function boot(): Promise<void> {
       if (!enemy.takeDamage(attack.damage, position)) return false;
       hitTargets.add(enemy);
       hud.damageNumber(enemy.position, attack.damage, 'dealt');
+
+      const heavy = attack.damage >= 40;
+      effects.spawn(enemy.position, heavy ? 'heavy' : 'hit');
+      // Only a confirmed hit sparks; a whiffed swing shows the trail alone.
+      vfx.spawn(heavy ? 'impactHeavy' : 'impact', enemy.position, player.yaw);
+      sfx.impact(heavy);
+      // A heavy cleave freezes the world a touch longer, so the weight reads.
+      hitStopTimer = Math.max(hitStopTimer, heavy ? 0.075 : 0.045);
+      if (!enemy.alive) sfx.enemyDeath();
+
       hits += 1;
       return true;
     };
@@ -295,12 +344,20 @@ async function boot(): Promise<void> {
   for (const enemy of enemies) {
     enemy.onHitPlayer = (damage, from) => {
       const applied = player.takeDamage(damage, from);
-      // Dodge i-frames take nothing, so they get no number either.
+      const blocked = applied > 0 && applied < damage - 0.01;
+
+      // Dodge i-frames take nothing, so they get no number, spark or sound.
       if (applied > 0) {
-        hud.damageNumber(player.position, applied, applied < damage - 0.01 ? 'blocked' : 'taken');
+        hud.damageNumber(player.position, applied, blocked ? 'blocked' : 'taken');
+        effects.spawn(player.position, blocked ? 'block' : 'hit');
+        hitStopTimer = Math.max(hitStopTimer, blocked ? 0.05 : 0.035);
+        if (blocked) sfx.block();
+        else sfx.hurt();
+        if (!player.alive) sfx.enemyDeath();
       }
+
       hud.flash();
-      cameraRig.shake(0.16);
+      cameraRig.shake(blocked ? 0.1 : 0.16);
     };
   }
 
@@ -322,6 +379,8 @@ async function boot(): Promise<void> {
   function restart(): void {
     player.reset();
     enemies.forEach((enemy) => enemy.reset());
+    vfx.clear();
+    slashPending = null;
     tracker.release();
     defeated = false;
     lastBanner = null;
@@ -330,7 +389,9 @@ async function boot(): Promise<void> {
   }
 
   window.addEventListener('keydown', (event) => {
-    if (event.key.toLowerCase() === 'r') restart();
+    const key = event.key.toLowerCase();
+    if (key === 'r') restart();
+    if (key === 'm') sfx.toggleMute();
   });
 
   function updateScoring(): void {
@@ -356,6 +417,17 @@ async function boot(): Promise<void> {
 
     player.update(delta, input, cameraRig);
 
+    // Fire the slash once the swing reaches its strike, not when the key went down.
+    if (slashPending) {
+      slashPending.remaining -= delta;
+      if (slashPending.remaining <= 0) {
+        if (player.attackingWith === slashPending.clip) {
+          vfx.spawn(slashPending.kind, player.position, player.yaw);
+        }
+        slashPending = null;
+      }
+    }
+
     for (const enemy of enemies) enemy.update(delta, player.position, player.alive);
 
     // Keep bodies apart without a physics engine.
@@ -369,6 +441,17 @@ async function boot(): Promise<void> {
       }
     }
 
+    // Ground telegraph under every enemy that has committed to a swing. Its
+    // ring fills as the wind-up completes, so the blow is telegraphed in-world.
+    let windupSlot = 0;
+    for (const enemy of enemies) {
+      if (enemy.isWindingUp) {
+        effects.setWindup(windupSlot, enemy.position, enemy.windupProgress);
+        windupSlot += 1;
+      }
+    }
+    effects.hideWindupsFrom(windupSlot);
+
     updateScoring();
     tracker.update(scoring, delta);
 
@@ -377,6 +460,8 @@ async function boot(): Promise<void> {
     cameraRig.setLockTarget(locked ? locked.position : null);
 
     cameraRig.update(delta, player.position, player.velocity);
+    effects.update(delta, cameraRig.camera);
+    vfx.update(delta, cameraRig.camera);
 
     sun.position.copy(player.position).add(SUN_OFFSET);
     sun.target.position.copy(player.position);
@@ -434,12 +519,17 @@ async function boot(): Promise<void> {
 
     // Bound catch-up work: a spike (tab switch, GC, shader compile) is replayed
     // in at most three slices so movement and animation never jump.
+    // Brief hit-stop: the world slows for a few dozen milliseconds on impact.
+    // Measured in real time so it cannot extend itself.
+    const timeScale = hitStopTimer > 0 ? 0.32 : 1;
+    if (hitStopTimer > 0) hitStopTimer = Math.max(0, hitStopTimer - raw);
+
     if (raw > 0.05) {
       const steps = Math.min(3, Math.ceil(raw / 0.05));
-      const slice = Math.min(raw, 0.25) / steps;
+      const slice = (Math.min(raw, 0.25) / steps) * timeScale;
       for (let i = 0; i < steps; i += 1) stepWorld(slice);
     } else {
-      stepWorld(raw);
+      stepWorld(raw * timeScale);
     }
 
     hud.setHealth(player.health, player.maxHealth);
@@ -475,6 +565,7 @@ async function boot(): Promise<void> {
       quality = level;
       storeQualityPreference(level);
       applyQuality(level, qualityTargets);
+      vfx.setQuality(level);
       resize();
       refreshStats(0, 1);
       return quality;

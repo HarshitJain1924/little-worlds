@@ -55,6 +55,7 @@ authored strike frame, not on the button press.
 | Lock on / release | `Tab` |
 | Next target | `Q` |
 | Zoom | mouse wheel |
+| Mute combat audio | `M` |
 | Restart after death | `R` |
 
 Movement is camera-relative. While locked on, the knight keeps facing the target,
@@ -100,6 +101,10 @@ screenshots re-render and read the frame in the same task.
 - **Animation** — clips come from `public/rpg/anims/`; each attack damages during
   its authored strike window (`hitStart`/`hitEnd` in `src/play/player.ts`), and
   dodge clips replay their captured root travel.
+- **Combat feedback** — landed blows spawn a pooled additive ring, a short
+  hit-stop (45 ms on light, 75 ms on heavy), camera shake and a procedural
+  WebAudio impact; a swing that hits nothing only plays the whoosh. Enemies that
+  commit to an attack show a filling ground ring until the blow lands.
 - **Debug harness** — `window.__play` is attached only in development or when the
   page is opened with `?debug`. It is absent from a normal production build.
 
