@@ -15,6 +15,11 @@ KayKit_RPGToolsBits_1.0_FREE/
 KayKit_ResourceBits_1.0_FREE/
 KayKit_Skeletons_1.1_FREE/
 gobkit-animal-pack/
+free-vfx-sampler-free-vfx-sampler/
 
 # local dev logs
 preview.log
+
+# SEAMPROOF sampler sheets: licensed for use in the game, not for redistribution
+# as raw files. Re-add locally from the sampler folder (see README/M5 audit).
+public/vfx/
