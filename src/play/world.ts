@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import type { CameraObstacle } from './collision';
 import type { Placement } from './models';
 import { DUNGEON, FOREST, buildInstances, loadDungeon, loadForest, placeModel } from './models';
 
@@ -70,6 +71,10 @@ export interface World {
   group: THREE.Group;
   heightAt: typeof heightAt;
   blockers: Blocker[];
+  /** Convex proxies for camera collision and target line of sight. */
+  obstacles: CameraObstacle[];
+  /** Instanced vegetation, so quality settings can drop its shadow casters. */
+  foliage: THREE.Group;
   dispose: () => void;
 }
 
@@ -173,7 +178,11 @@ function scatter(models: GLTF[], random: () => number, options: ScatterOptions):
 export async function buildWorld(onProgress: (fraction: number, label: string) => void): Promise<World> {
   const group = new THREE.Group();
   group.name = 'world';
+  const foliage = new THREE.Group();
+  foliage.name = 'foliage';
+  group.add(foliage);
   const blockers: Blocker[] = [];
+  const obstacles: CameraObstacle[] = [];
 
   onProgress(0.05, 'shaping the ground…');
   const ground = createGround();
@@ -203,7 +212,21 @@ export async function buildWorld(onProgress: (fraction: number, label: string) =
 
   trees.forEach((model, index) => {
     const placements = treePlacements[index];
-    if (placements.length) group.add(buildInstances(model, placements));
+    if (!placements.length) return;
+    foliage.add(buildInstances(model, placements));
+
+    // Trunk-only proxies: enough for the camera to refuse to enter a tree,
+    // without pretending the canopy is solid.
+    for (const placement of placements) {
+      obstacles.push({
+        kind: 'cylinder',
+        x: placement.x,
+        z: placement.z,
+        radius: 0.42 * placement.scale,
+        bottom: placement.y,
+        top: placement.y + 5.6 * placement.scale,
+      });
+    }
   });
 
   const bushPlacements = scatter(bushes, random, {
@@ -215,7 +238,7 @@ export async function buildWorld(onProgress: (fraction: number, label: string) =
   });
   bushes.forEach((model, index) => {
     const placements = bushPlacements[index];
-    if (placements.length) group.add(buildInstances(model, placements));
+    if (placements.length) foliage.add(buildInstances(model, placements));
   });
 
   const rockPlacements = scatter(rocks, random, {
@@ -240,7 +263,7 @@ export async function buildWorld(onProgress: (fraction: number, label: string) =
   });
   grass.forEach((model, index) => {
     const placements = grassPlacements[index];
-    if (placements.length) group.add(buildInstances(model, placements));
+    if (placements.length) foliage.add(buildInstances(model, placements));
   });
 
   // ---- ruin ------------------------------------------------------------
@@ -281,12 +304,12 @@ export async function buildWorld(onProgress: (fraction: number, label: string) =
     const halfWidth = 2;
     const halfDepth = 0.55;
     const along = Math.abs(Math.sin(yaw)) > 0.5;
-    blockers.push({
-      minX: x - (along ? halfDepth : halfWidth),
-      maxX: x + (along ? halfDepth : halfWidth),
-      minZ: z - (along ? halfWidth : halfDepth),
-      maxZ: z + (along ? halfWidth : halfDepth),
-    });
+    const minX = x - (along ? halfDepth : halfWidth);
+    const maxX = x + (along ? halfDepth : halfWidth);
+    const minZ = z - (along ? halfWidth : halfDepth);
+    const maxZ = z + (along ? halfWidth : halfDepth);
+    blockers.push({ minX, maxX, minZ, maxZ });
+    obstacles.push({ kind: 'box', minX, maxX, minZ, maxZ, bottom: ruinY, top: ruinY + 4.4 });
   }
 
   group.add(placeModel(doorwayGltf, ARENA.ruin.x, wallY, ARENA.ruin.z + 4, 0, 1));
@@ -297,6 +320,15 @@ export async function buildWorld(onProgress: (fraction: number, label: string) =
     group.add(placeModel(pillarGltf, x, ruinY, z, 0, 1));
     group.add(placeModel(torchGltf, x, ruinY + 2.55, z, 0, 1));
     blockers.push({ minX: x - 0.6, maxX: x + 0.6, minZ: z - 0.6, maxZ: z + 0.6 });
+    obstacles.push({
+      kind: 'box',
+      minX: x - 0.6,
+      maxX: x + 0.6,
+      minZ: z - 0.6,
+      maxZ: z + 0.6,
+      bottom: ruinY,
+      top: ruinY + 4.2,
+    });
 
     const light = new THREE.PointLight(0xffb268, 8, 13, 2);
     light.position.set(x, ruinY + 3.1, z);
@@ -304,6 +336,16 @@ export async function buildWorld(onProgress: (fraction: number, label: string) =
   }
 
   group.add(placeModel(cratesGltf, ARENA.ruin.x + 2.4, ruinY + 0.1, ARENA.ruin.z - 2.6, 0.4, 1));
+  // Crates do not block walking today, but the camera should not enter them.
+  obstacles.push({
+    kind: 'box',
+    minX: ARENA.ruin.x + 0.9,
+    maxX: ARENA.ruin.x + 3.9,
+    minZ: ARENA.ruin.z - 4.1,
+    maxZ: ARENA.ruin.z - 1.1,
+    bottom: ruinY,
+    top: ruinY + 2.2,
+  });
 
   onProgress(0.95, 'lighting the glade…');
 
@@ -311,6 +353,8 @@ export async function buildWorld(onProgress: (fraction: number, label: string) =
     group,
     heightAt,
     blockers,
+    obstacles,
+    foliage,
     dispose: () => {
       group.traverse((child) => {
         const mesh = child as THREE.Mesh;

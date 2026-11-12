@@ -1,8 +1,11 @@
 /**
  * Keyboard, mouse and touch input.
  *
- * Mouse: left-drag to look, left-click to attack, right-hold to block, wheel to zoom.
- * Keyboard: WASD move, Shift run, Space jump, J light, K heavy, F block, C/L dodge.
+ * Mouse: click the canvas to capture the pointer, then look with free mouse
+ * movement; left click attacks, right-hold blocks, wheel zooms. Escape releases
+ * the pointer (handled by the browser); clicking the canvas recaptures it.
+ * Keyboard: WASD move, Shift run, Space jump, J light, K heavy, F block,
+ * C/L dodge, Tab lock target, Q next target.
  * Touch: left half is a virtual stick, right half looks, two fingers pinch-zoom.
  */
 
@@ -27,15 +30,23 @@ export class InputController {
   /** Direct state injection for scripted verification; unused by real input. */
   readonly virtual = { x: 0, y: 0, run: false, block: false };
 
+  /** Fired whenever pointer capture starts or stops. */
+  onPointerLockChange: ((locked: boolean) => void) | null = null;
+
   private readonly held = new Set<string>();
   private attackQueued = false;
   private heavyQueued = false;
   private dodgeQueued = false;
   private jumpQueued = false;
+  private lockToggleQueued = false;
+  private lockNextQueued = false;
   private mouseBlock = false;
   private lookX = 0;
   private lookY = 0;
   private zoomQueued = 0;
+
+  private pointerLocked = false;
+  private readonly lockSupported: boolean;
 
   private stickId: number | null = null;
   private readonly stickOrigin = { x: 0, y: 0 };
@@ -45,16 +56,21 @@ export class InputController {
   private readonly lookLast = { x: 0, y: 0 };
   private readonly touches = new Map<number, { x: number; y: number }>();
   private pinchDistance = 0;
-  private tapCandidate: { x: number; y: number; time: number } | null = null;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
     private readonly attackButton: HTMLButtonElement | null,
     private readonly stickElement: HTMLElement | null,
+    private readonly lockButton: HTMLButtonElement | null = null,
   ) {
+    this.lockSupported = typeof canvas.requestPointerLock === 'function';
+
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
     window.addEventListener('blur', this.onBlur);
+    document.addEventListener('pointerlockchange', this.onPointerLockEvent);
+    document.addEventListener('pointerlockerror', this.onPointerLockError);
+    document.addEventListener('mousemove', this.onMouseMove);
 
     canvas.addEventListener('pointerdown', this.onPointerDown);
     canvas.addEventListener('pointermove', this.onPointerMove);
@@ -67,6 +83,20 @@ export class InputController {
       event.preventDefault();
       this.attackQueued = true;
     });
+
+    this.lockButton?.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      this.lockToggleQueued = true;
+    });
+  }
+
+  get isPointerLocked(): boolean {
+    return this.pointerLocked;
+  }
+
+  /** True while the pointer is free, so the UI can ask for a click to resume. */
+  get needsCapture(): boolean {
+    return this.lockSupported && !this.pointerLocked && !this.touchCapable;
   }
 
   readMove(): MoveInput {
@@ -106,6 +136,14 @@ export class InputController {
     this.jumpQueued = true;
   }
 
+  queueLockToggle(): void {
+    this.lockToggleQueued = true;
+  }
+
+  queueLockNext(): void {
+    this.lockNextQueued = true;
+  }
+
   takeLook(): LookDelta {
     const delta = { x: this.lookX, y: this.lookY };
     this.lookX = 0;
@@ -143,12 +181,31 @@ export class InputController {
     return queued;
   }
 
+  takeLockToggle(): boolean {
+    const queued = this.lockToggleQueued;
+    this.lockToggleQueued = false;
+    return queued;
+  }
+
+  takeLockNext(): boolean {
+    const queued = this.lockNextQueued;
+    this.lockNextQueued = false;
+    return queued;
+  }
+
   isBlocking(): boolean {
     return this.held.has('f') || this.mouseBlock || this.virtual.block;
   }
 
   private readonly onKeyDown = (event: KeyboardEvent): void => {
     const key = event.key.toLowerCase();
+
+    if (key === 'tab') {
+      // Tab would otherwise move focus out of the game.
+      event.preventDefault();
+      if (!this.held.has('tab')) this.lockToggleQueued = true;
+    }
+    if (key === 'q' && !this.held.has('q')) this.lockNextQueued = true;
 
     if (key === ' ') {
       event.preventDefault();
@@ -176,35 +233,37 @@ export class InputController {
     this.hideStick();
   };
 
+  private readonly onPointerLockEvent = (): void => {
+    this.pointerLocked = document.pointerLockElement === this.canvas;
+    if (!this.pointerLocked) {
+      // Releasing capture must not leave a stuck guard or movement key.
+      this.mouseBlock = false;
+      this.lookId = null;
+    }
+    this.onPointerLockChange?.(this.pointerLocked);
+  };
+
+  private readonly onPointerLockError = (): void => {
+    // Denied (usually a non-gesture request): drag-look stays available.
+    this.pointerLocked = false;
+    this.onPointerLockChange?.(false);
+  };
+
+  private readonly onMouseMove = (event: MouseEvent): void => {
+    if (!this.pointerLocked) return;
+    this.lookX += event.movementX;
+    this.lookY += event.movementY;
+  };
+
   private readonly onPointerDown = (event: PointerEvent): void => {
-    try {
-      this.canvas.setPointerCapture(event.pointerId);
-    } catch {
-      // Synthetic pointer events (and a few browsers) reject capture; dragging
-      // still works while the pointer stays over the canvas, which fills the viewport.
+    if (event.pointerType === 'touch') {
+      this.onTouchDown(event);
+      return;
     }
 
-    if (event.pointerType === 'touch') {
-      this.touches.set(event.pointerId, { x: event.clientX, y: event.clientY });
-
-      if (this.touches.size >= 2) {
-        this.pinchDistance = this.touchSpan();
-        return;
-      }
-
-      if (event.clientX < window.innerWidth * 0.5 && this.stickId === null) {
-        this.stickId = event.pointerId;
-        this.stickOrigin.x = event.clientX;
-        this.stickOrigin.y = event.clientY;
-        this.stickVector.x = 0;
-        this.stickVector.y = 0;
-        this.showStick();
-        return;
-      }
-
-      this.lookId = event.pointerId;
-      this.lookLast.x = event.clientX;
-      this.lookLast.y = event.clientY;
+    if (this.pointerLocked) {
+      if (event.button === 0) this.attackQueued = true;
+      if (event.button === 2) this.mouseBlock = true;
       return;
     }
 
@@ -213,11 +272,57 @@ export class InputController {
       return;
     }
 
+    // First click captures the mouse instead of attacking.
+    if (this.lockSupported) {
+      this.requestLock();
+      return;
+    }
+
+    // No pointer lock available (older browsers, embedded frames): drag to look
+    // and click to attack, as before.
+    try {
+      this.canvas.setPointerCapture(event.pointerId);
+    } catch {
+      // Synthetic pointer events reject capture; dragging still works.
+    }
     this.lookId = event.pointerId;
     this.lookLast.x = event.clientX;
     this.lookLast.y = event.clientY;
-    this.tapCandidate = event.button === 0 ? { x: event.clientX, y: event.clientY, time: performance.now() } : null;
+    if (event.button === 0) this.attackQueued = true;
   };
+
+  private requestLock(): void {
+    const request = this.canvas.requestPointerLock();
+    // Newer Chrome returns a promise that rejects when the gesture is lost.
+    if (request && typeof (request as Promise<void>).catch === 'function') {
+      (request as Promise<void>).catch(() => {
+        this.pointerLocked = false;
+      });
+    }
+  }
+
+  private onTouchDown(event: PointerEvent): void {
+    this.touches.set(event.pointerId, { x: event.clientX, y: event.clientY });
+
+    if (this.touches.size >= 2) {
+      this.pinchDistance = this.touchSpan();
+      return;
+    }
+
+    if (event.clientX < window.innerWidth * 0.5 && this.stickId === null) {
+      this.stickId = event.pointerId;
+      this.stickOrigin.x = event.clientX;
+      this.stickOrigin.y = event.clientY;
+      this.stickVector.x = 0;
+      this.stickVector.y = 0;
+      this.showStick();
+      return;
+    }
+
+    this.lookId = event.pointerId;
+    this.lookLast.x = event.clientX;
+    this.lookLast.y = event.clientY;
+  }
 
   private readonly onPointerMove = (event: PointerEvent): void => {
     if (event.pointerType === 'touch') {
@@ -272,14 +377,6 @@ export class InputController {
       return;
     }
 
-    // A left click that never moved is an attack, not a camera drag.
-    if (this.tapCandidate && event.pointerId === this.lookId) {
-      const dx = event.clientX - this.tapCandidate.x;
-      const dy = event.clientY - this.tapCandidate.y;
-      const quick = performance.now() - this.tapCandidate.time < 350;
-      if (Math.hypot(dx, dy) < 6 && quick) this.attackQueued = true;
-    }
-    this.tapCandidate = null;
     if (event.pointerId === this.lookId) this.lookId = null;
   };
 

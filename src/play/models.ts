@@ -156,6 +156,20 @@ export function placeModel(
   return object;
 }
 
+/**
+ * Authored horizontal root travel of a Dodge_* clip, sampled in metres in the
+ * character's local space (+x left, +z forward). The pack's dodges are short
+ * evasive steps rather than rolls, and that travel is what makes them read as a
+ * step instead of a lean, so it is lifted out and replayed by the player.
+ */
+export interface DodgeMotion {
+  times: number[];
+  x: number[];
+  z: number[];
+}
+
+export const DODGE_MOTION = new Map<string, DodgeMotion>();
+
 export async function loadClipSet(): Promise<Map<string, THREE.AnimationClip>> {
   // All four KayKit rig files target the same 23-bone Rig_Medium skeleton, so a
   // clip loaded from one plays on any character built on it.
@@ -169,11 +183,22 @@ export async function loadClipSet(): Promise<Map<string, THREE.AnimationClip>> {
   const clips = new Map<string, THREE.AnimationClip>();
   for (const source of sources) {
     for (const clip of source.animations) {
-      // Dodge_* clips author horizontal displacement on the `root` bone; strip
-      // XZ so the physics collider in Player owns movement without visual snap-back.
+      // Dodge_* clips author horizontal displacement on the `root` bone. Capture
+      // it as a curve, then strip XZ so the collider in Player is the only thing
+      // moving the character (no double movement, no snap-back on exit).
       if (clip.name.startsWith('Dodge_')) {
         for (const track of clip.tracks) {
           if (track.name === 'root.position') {
+            const times: number[] = [];
+            const x: number[] = [];
+            const z: number[] = [];
+            for (let i = 0; i < track.times.length; i += 1) {
+              times.push(track.times[i]);
+              x.push(track.values[i * 3]);
+              z.push(track.values[i * 3 + 2]);
+            }
+            DODGE_MOTION.set(clip.name, { times, x, z });
+
             for (let i = 0; i < track.values.length; i += 3) {
               track.values[i] = 0;
               track.values[i + 2] = 0;

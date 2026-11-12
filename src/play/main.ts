@@ -3,17 +3,25 @@ import './play.css';
 import { ThirdPersonCamera } from './camera';
 import type { WeaponSpec } from './character';
 import { CharacterRig, SOCKETS, weaponFrom } from './character';
+import { hasLineOfSight } from './collision';
 import { InputController } from './input';
 import { ASSETS, loadClipSet, loadModel } from './models';
 import { Player } from './player';
 import type { EnemyConfig } from './enemy';
 import { Enemy } from './enemy';
+import { applyQuality, readQualityPreference, storeQualityPreference, type QualityLevel } from './quality';
+import { TargetTracker } from './targeting';
 import { ARENA, buildWorld } from './world';
 import { Hud } from './hud';
 
 const loadingFill = document.querySelector<HTMLElement>('#loading-fill');
 const loadingLabel = document.querySelector<HTMLElement>('#loading-label');
 const loadingRoot = document.querySelector<HTMLElement>('#loading');
+
+/** Distance at which an enemy becomes a candidate for soft/hard targeting. */
+const TARGET_RANGE = 15;
+/** Fixed sun offset from the player, so the shadow frustum follows the action. */
+const SUN_OFFSET = new THREE.Vector3(18, 20, 11);
 
 function progress(fraction: number, label?: string): void {
   if (loadingFill) loadingFill.style.width = `${Math.round(Math.min(1, fraction) * 100)}%`;
@@ -105,10 +113,9 @@ async function boot(): Promise<void> {
     canvas,
     antialias: !coarse,
     powerPreference: 'high-performance',
-    // Keeps scripted screenshots and pixel probes reading the frame just drawn.
-    preserveDrawingBuffer: true,
+    // No preserveDrawingBuffer: screenshots re-render and read in the same task
+    // instead of paying for a permanently retained back buffer.
   });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, coarse ? 1.5 : 1.75));
   renderer.setSize(window.innerWidth, window.innerHeight, false);
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFShadowMap;
@@ -117,15 +124,14 @@ async function boot(): Promise<void> {
 
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0xdcebf6);
-  scene.fog = new THREE.Fog(0xdcebf6, 70, 150);
+  scene.fog = new THREE.Fog(0xdcebf6, 60, 130);
 
   const sunDirection = new THREE.Vector3(0.58, 0.62, 0.36).normalize();
   scene.add(createSkyDome(sunDirection));
 
   const sun = new THREE.DirectionalLight(0xfff3e0, 3.2);
   sun.castShadow = true;
-  const shadowSize = coarse ? 1024 : 2048;
-  sun.shadow.mapSize.set(shadowSize, shadowSize);
+  sun.shadow.mapSize.set(1024, 1024);
   sun.shadow.camera.near = 1;
   sun.shadow.camera.far = 72;
   sun.shadow.camera.left = -16;
@@ -156,6 +162,10 @@ async function boot(): Promise<void> {
 
   scene.add(world.group);
 
+  let quality: QualityLevel = readQualityPreference(coarse);
+  const qualityTargets = { renderer, sun, scene, foliage: world.foliage };
+  applyQuality(quality, qualityTargets);
+
   progress(0.72, 'arming the knight…');
 
   const knightWeapons: WeaponSpec[] = [
@@ -167,7 +177,10 @@ async function boot(): Promise<void> {
 
   const player = new Player(playerRig, world);
 
-  const cameraRig = new ThirdPersonCamera(window.innerWidth / window.innerHeight);
+  const cameraRig = new ThirdPersonCamera(window.innerWidth / window.innerHeight, {
+    obstacles: world.obstacles,
+    heightAt: world.heightAt,
+  });
 
   // Three enemies between the spawn and the ruin, so the walk has a fight in it.
   const enemySpecs: { config: EnemyConfig; spawn: { x: number; z: number }; kind: 'minion' | 'warrior' }[] = [
@@ -193,39 +206,79 @@ async function boot(): Promise<void> {
     return enemy;
   });
 
+  // Target selection reads the same convex proxies the camera collides with, so
+  // visibility costs a handful of segment tests rather than a scene raycast.
+  const tracker = new TargetTracker<Enemy>({
+    maxRange: TARGET_RANGE,
+    releaseRange: TARGET_RANGE + 6,
+    maxAngle: Math.PI * 0.6,
+    perceptionInterval: 0.2,
+    lostSightGrace: 1.2,
+    isVisible: (from, to) =>
+      hasLineOfSight(from.x, from.y + 1.2, from.z, to.x, to.y + 1.2, to.z, world.obstacles),
+  });
+  for (const enemy of enemies) tracker.register(enemy);
+
+  const scoring = {
+    player: player.position as { x: number; y: number; z: number },
+    cameraForward: { x: 0, z: -1 },
+    playerForward: { x: 0, z: 1 },
+    maxRange: TARGET_RANGE,
+    maxAngle: Math.PI * 0.6,
+  };
+
   const input = new InputController(
     canvas,
     document.querySelector<HTMLButtonElement>('#attack'),
     document.querySelector<HTMLElement>('#stick'),
+    document.querySelector<HTMLButtonElement>('#lock'),
   );
+
+  hud.setCaptureHint(input.needsCapture);
+  input.onPointerLockChange = (locked) => hud.setCaptureHint(!locked && input.needsCapture);
+
+  const scratchA = new THREE.Vector3();
+  const scratchForward = new THREE.Vector3();
+  const scratchFacing = new THREE.Vector3();
 
   player.onAttackHit = (position, forward, attack, hitTargets) => {
     let hits = 0;
 
-    for (const enemy of enemies) {
-      if (!enemy.alive || hitTargets.has(enemy)) continue;
+    const tryHit = (enemy: Enemy): boolean => {
+      if (!enemy.alive || hitTargets.has(enemy)) return false;
 
-      const toEnemy = enemy.position.clone().sub(position).setY(0);
+      const toEnemy = scratchA.copy(enemy.position).sub(position).setY(0);
       const distance = toEnemy.length();
-      if (distance > attack.range + 0.7) continue;
+      if (distance > attack.range + 0.7) return false;
 
       if (distance > 0.001) {
         toEnemy.normalize();
-        if (Math.acos(Math.min(1, Math.max(-1, toEnemy.dot(forward)))) > attack.arc) continue;
+        if (Math.acos(Math.min(1, Math.max(-1, toEnemy.dot(forward)))) > attack.arc) return false;
       }
 
-      if (enemy.takeDamage(attack.damage, position)) {
-        hitTargets.add(enemy);
-        hits += 1;
-      }
-    }
+      if (!enemy.takeDamage(attack.damage, position)) return false;
+      hitTargets.add(enemy);
+      hud.damageNumber(enemy.position, attack.damage, 'dealt');
+      hits += 1;
+      return true;
+    };
+
+    // The selected target is struck first; the cone only sweeps alternatives
+    // when it cannot reach the selection.
+    const preferred = tracker.preferred;
+    if (preferred) tryHit(preferred);
+    if (hits === 0) for (const enemy of enemies) tryHit(enemy);
 
     if (hits > 0) cameraRig.shake(attack.damage >= 40 ? 0.15 : 0.09);
   };
 
   for (const enemy of enemies) {
     enemy.onHitPlayer = (damage, from) => {
-      player.takeDamage(damage, from);
+      const applied = player.takeDamage(damage, from);
+      // Dodge i-frames take nothing, so they get no number either.
+      if (applied > 0) {
+        hud.damageNumber(player.position, applied, applied < damage - 0.01 ? 'blocked' : 'taken');
+      }
       hud.flash();
       cameraRig.shake(0.16);
     };
@@ -249,6 +302,7 @@ async function boot(): Promise<void> {
   function restart(): void {
     player.reset();
     enemies.forEach((enemy) => enemy.reset());
+    tracker.release();
     defeated = false;
     lastBanner = null;
     hud.showBanner(null);
@@ -259,28 +313,26 @@ async function boot(): Promise<void> {
     if (event.key.toLowerCase() === 'r') restart();
   });
 
-  // First paint before the loop starts, so a hidden tab still shows the scene.
-  player.update(0, input, cameraRig);
-  cameraRig.update(0, player.position, world.heightAt);
-  renderer.render(scene, cameraRig.camera);
-  hud.setHealth(player.health, player.maxHealth);
-  hud.setObjective('Reach the ruin · defeat the skeletons');
-
-  if (loadingRoot) {
-    loadingRoot.classList.add('is-hidden');
-    window.setTimeout(() => loadingRoot.remove(), 500);
+  function updateScoring(): void {
+    const forward = cameraRig.forward(scratchForward);
+    scoring.cameraForward.x = forward.x;
+    scoring.cameraForward.z = forward.z;
+    const facing = player.facing(scratchFacing);
+    scoring.playerForward.x = facing.x;
+    scoring.playerForward.z = facing.z;
   }
-
-  let previous = performance.now();
-  let statsTimer = 0;
-  let frames = 0;
 
   /** One simulation step, shared by the render loop and the test harness. */
   function stepWorld(delta: number): void {
     const look = input.takeLook();
-    cameraRig.rotate(look.x, look.y);
+    if (look.x !== 0 || look.y !== 0) cameraRig.rotate(look.x, look.y);
     const zoom = input.takeZoom();
     if (zoom !== 0) cameraRig.zoom(zoom);
+
+    updateScoring();
+
+    if (input.takeLockToggle()) tracker.toggleLock(scoring);
+    if (input.takeLockNext()) tracker.cycle(scoring);
 
     player.update(delta, input, cameraRig);
 
@@ -289,7 +341,7 @@ async function boot(): Promise<void> {
     // Keep bodies apart without a physics engine.
     for (const enemy of enemies) {
       if (!enemy.alive) continue;
-      const away = enemy.position.clone().sub(player.position).setY(0);
+      const away = scratchA.copy(enemy.position).sub(player.position).setY(0);
       const gap = away.length();
       if (gap > 0.001 && gap < 1.1) {
         away.normalize().multiplyScalar((1.1 - gap) * 0.6);
@@ -297,11 +349,20 @@ async function boot(): Promise<void> {
       }
     }
 
-    cameraRig.update(delta, player.position, world.heightAt);
+    updateScoring();
+    tracker.update(scoring, delta);
 
-    sun.position.copy(player.position).add(new THREE.Vector3(18, 20, 11));
+    const locked = tracker.locked;
+    player.setLockTarget(locked ? locked.position : null);
+    cameraRig.setLockTarget(locked ? locked.position : null);
+
+    cameraRig.update(delta, player.position, player.velocity);
+
+    sun.position.copy(player.position).add(SUN_OFFSET);
     sun.target.position.copy(player.position);
     sun.target.updateMatrixWorld();
+
+    hud.setTarget(tracker.locked ?? tracker.soft, tracker.isLocked);
 
     // Run-end state lives here so it fires whether the loop is running or the
     // simulation is being stepped by a test.
@@ -316,31 +377,60 @@ async function boot(): Promise<void> {
     }
   }
 
+  function refreshStats(frames: number, seconds: number): void {
+    const alive = enemies.filter((enemy) => enemy.alive).length;
+    hud.setStats(
+      [
+        `fps    ${(frames / Math.max(seconds, 0.0001)).toFixed(0)}  (${((seconds * 1000) / Math.max(frames, 1)).toFixed(1)} ms)`,
+        `draws  ${renderer.info.render.calls}`,
+        `tris   ${(renderer.info.render.triangles / 1000).toFixed(1)}k`,
+        `qual   ${quality}  ${renderer.getPixelRatio().toFixed(2)}x  shadow ${sun.shadow.mapSize.x}`,
+        `hp     ${Math.round(player.health)}  · foes ${alive}`,
+      ].join('\n'),
+    );
+  }
+
+  // First paint before the loop starts, so a hidden tab still shows the scene.
+  player.update(0, input, cameraRig);
+  cameraRig.update(0, player.position);
+  renderer.render(scene, cameraRig.camera);
+  hud.setHealth(player.health, player.maxHealth);
+  hud.setObjective('Reach the ruin · defeat the skeletons');
+
+  if (loadingRoot) {
+    loadingRoot.classList.add('is-hidden');
+    window.setTimeout(() => loadingRoot.remove(), 500);
+  }
+
+  let previous = performance.now();
+  let statsTimer = 0;
+  let frames = 0;
+
   renderer.setAnimationLoop(() => {
     const now = performance.now();
-    const delta = Math.min((now - previous) / 1000, 0.05);
+    const raw = (now - previous) / 1000;
     previous = now;
     if (document.hidden) return;
 
-    stepWorld(delta);
+    // Bound catch-up work: a spike (tab switch, GC, shader compile) is replayed
+    // in at most three slices so movement and animation never jump.
+    if (raw > 0.05) {
+      const steps = Math.min(3, Math.ceil(raw / 0.05));
+      const slice = Math.min(raw, 0.25) / steps;
+      for (let i = 0; i < steps; i += 1) stepWorld(slice);
+    } else {
+      stepWorld(raw);
+    }
 
     hud.setHealth(player.health, player.maxHealth);
-    hud.update(delta, cameraRig.camera, window.innerWidth, window.innerHeight);
+    hud.update(raw, cameraRig.camera, window.innerWidth, window.innerHeight);
 
     renderer.render(scene, cameraRig.camera);
 
     frames += 1;
-    statsTimer += delta;
+    statsTimer += raw;
     if (statsTimer >= 0.5) {
-      const alive = enemies.filter((enemy) => enemy.alive).length;
-      hud.setStats(
-        [
-          `fps    ${(frames / statsTimer).toFixed(0)}  (${((statsTimer * 1000) / frames).toFixed(1)} ms)`,
-          `draws  ${renderer.info.render.calls}`,
-          `tris   ${(renderer.info.render.triangles / 1000).toFixed(1)}k`,
-          `hp     ${Math.round(player.health)}  · foes ${alive}`,
-        ].join('\n'),
-      );
+      refreshStats(frames, statsTimer);
       frames = 0;
       statsTimer = 0;
     }
@@ -351,9 +441,19 @@ async function boot(): Promise<void> {
     player,
     enemies,
     camera: cameraRig,
+    tracker,
     renderer,
     scene,
     sun,
+    quality: () => quality,
+    setQuality: (level: QualityLevel) => {
+      quality = level;
+      storeQualityPreference(level);
+      applyQuality(level, qualityTargets);
+      resize();
+      refreshStats(0, 1);
+      return quality;
+    },
     press: (key: string) => {
       window.dispatchEvent(new KeyboardEvent('keydown', { key }));
       window.dispatchEvent(new KeyboardEvent('keyup', { key }));
@@ -361,14 +461,21 @@ async function boot(): Promise<void> {
     hold: (key: string, down: boolean) => {
       window.dispatchEvent(new KeyboardEvent(down ? 'keydown' : 'keyup', { key }));
     },
+    /** Camera-only look, for camera-math checks that bypass pointer lock. */
+    look: (dx: number, dy: number) => {
+      cameraRig.rotate(dx, dy);
+      cameraRig.update(0, player.position, player.velocity);
+    },
+    lock: () => tracker.toggleLock(scoring),
+    cycle: () => tracker.cycle(scoring),
     teleport: (x: number, z: number) => {
       player.position.set(x, world.heightAt(x, z), z);
       playerRig.root.position.copy(player.position);
-      cameraRig.update(0, player.position, world.heightAt);
+      cameraRig.update(0, player.position);
     },
     snapCamera: (yaw: number, pitch: number) => {
       cameraRig.snap(yaw, pitch);
-      cameraRig.update(0, player.position, world.heightAt);
+      cameraRig.update(0, player.position);
     },
     state: () => ({
       player: {
@@ -381,6 +488,7 @@ async function boot(): Promise<void> {
         attacking: player.isAttacking,
         blocking: player.isBlocking,
         dodging: player.isDodging,
+        dodgeClip: player.dodgingWith,
       },
       enemies: enemies.map((enemy) => ({
         hp: Math.round(enemy.health),
@@ -390,6 +498,22 @@ async function boot(): Promise<void> {
         x: +enemy.position.x.toFixed(2),
         z: +enemy.position.z.toFixed(2),
       })),
+      camera: {
+        yaw: +cameraRig.yaw.toFixed(3),
+        pitch: +cameraRig.pitch.toFixed(3),
+        distance: +cameraRig.distance.toFixed(2),
+      },
+      target: {
+        locked: tracker.isLocked,
+        soft: tracker.soft?.config.label ?? null,
+        lock: tracker.locked?.config.label ?? null,
+        softIndex: tracker.soft ? enemies.indexOf(tracker.soft) : -1,
+        lockIndex: tracker.locked ? enemies.indexOf(tracker.locked) : -1,
+      },
+      pointerLock: input.isPointerLocked,
+      quality,
+      pixelRatio: +renderer.getPixelRatio().toFixed(2),
+      shadowMap: sun.shadow.mapSize.x,
       draws: renderer.info.render.calls,
       triangles: renderer.info.render.triangles,
     }),
@@ -399,12 +523,12 @@ async function boot(): Promise<void> {
       player.position.set(enemy.position.x, enemy.position.y, enemy.position.z + 1.8);
       player.yaw = Math.PI;
       playerRig.root.position.copy(player.position);
-      cameraRig.update(0, player.position, world.heightAt);
+      cameraRig.update(0, player.position);
     },
     spawnDistance: ARENA.spawn,
     /** Fixed-step driver: real input state, no timers, fully deterministic. */
     step: (
-      frames: number,
+      count: number,
       delta: number,
       move: {
         x?: number;
@@ -415,6 +539,8 @@ async function boot(): Promise<void> {
         dodge?: boolean;
         block?: boolean;
         jump?: boolean;
+        lock?: boolean;
+        next?: boolean;
       } = {},
     ) => {
       input.virtual.x = move.x ?? 0;
@@ -425,8 +551,10 @@ async function boot(): Promise<void> {
       if (move.heavy) input.queueHeavy();
       if (move.dodge) input.queueDodge();
       if (move.jump) input.queueJump();
+      if (move.lock) input.queueLockToggle();
+      if (move.next) input.queueLockNext();
 
-      for (let i = 0; i < frames; i += 1) stepWorld(delta);
+      for (let i = 0; i < count; i += 1) stepWorld(delta);
 
       renderer.render(scene, cameraRig.camera);
       hud.setHealth(player.health, player.maxHealth);
@@ -442,13 +570,56 @@ async function boot(): Promise<void> {
         attacking: player.isAttacking,
         blocking: player.isBlocking,
         dodging: player.isDodging,
+        dodgeClip: player.dodgingWith,
+        camera: {
+          yaw: +cameraRig.yaw.toFixed(3),
+          pitch: +cameraRig.pitch.toFixed(3),
+          distance: +cameraRig.distance.toFixed(2),
+        },
+        locked: tracker.isLocked,
+        lock: tracker.locked?.config.label ?? null,
+        soft: tracker.soft?.config.label ?? null,
         enemies: enemies.map((enemy) => ({
           hp: Math.round(enemy.health),
           alive: enemy.alive,
           state: enemy.state,
           clip: enemy.rig.animator.playing,
         })),
+        draws: renderer.info.render.calls,
+        triangles: renderer.info.render.triangles,
       };
+    },
+    /** Repeated render timing for before/after comparison. */
+    benchmark: (sampleCount = 180) => {
+      const samples: number[] = [];
+      for (let i = 0; i < sampleCount; i += 1) {
+        const start = performance.now();
+        stepWorld(1 / 60);
+        hud.update(0, cameraRig.camera, window.innerWidth, window.innerHeight);
+        renderer.render(scene, cameraRig.camera);
+        samples.push(performance.now() - start);
+      }
+      samples.sort((a, b) => a - b);
+      const total = samples.reduce((sum, value) => sum + value, 0);
+      const at = (fraction: number) => samples[Math.min(samples.length - 1, Math.floor(samples.length * fraction))];
+      return {
+        frames: sampleCount,
+        avgMs: +(total / samples.length).toFixed(2),
+        medianMs: +at(0.5).toFixed(2),
+        p95Ms: +at(0.95).toFixed(2),
+        maxMs: +samples[samples.length - 1].toFixed(2),
+        fps: +(1000 / (total / samples.length)).toFixed(1),
+        draws: renderer.info.render.calls,
+        triangles: renderer.info.render.triangles,
+        pixelRatio: +renderer.getPixelRatio().toFixed(2),
+        shadowMap: sun.shadow.mapSize.x,
+        quality,
+      };
+    },
+    /** Renders and reads the frame in the same task: no preserveDrawingBuffer. */
+    screenshot: () => {
+      renderer.render(scene, cameraRig.camera);
+      return canvas.toDataURL('image/png');
     },
   };
 }

@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import type { CharacterRig } from './character';
+import type { DodgeMotion } from './models';
+import { DODGE_MOTION } from './models';
 import type { ThirdPersonCamera } from './camera';
 import type { InputController } from './input';
 import type { Blocker, World } from './world';
@@ -22,6 +24,8 @@ export interface AttackProfile {
   hitEnd: number;
   timeScale: number;
   cooldown: number;
+  /** Heavy swings trade hits instead of being cancelled by incoming damage. */
+  armored?: boolean;
 }
 
 export const ATTACKS = {
@@ -46,6 +50,7 @@ export const ATTACKS = {
     hitEnd: 0.65,
     timeScale: 1,
     cooldown: 1.9,
+    armored: true,
   } as AttackProfile,
 } as const;
 
@@ -58,11 +63,17 @@ const BLOCK = {
 } as const;
 
 const DODGE = {
+  /** Playback speed of the authored step. */
+  timeScale: 1.25,
+  /** Constant dash added on top of the clip's own footwork. */
+  speed: 4.6,
+  /** Multiplier on the clip's authored root travel. */
+  reach: 1.6,
+  /** Ready again just after the move ends, so chained dodges feel responsive. */
+  cooldown: 0.42,
+  invulnerable: 0.28,
+  /** Fallback length when the pack has no dodge clip. */
   duration: 0.4,
-  speed: 9.5,
-  cooldown: 0.85,
-  /** i-frames, slightly shorter than the clip so recovery is punishable. */
-  invulnerable: 0.3,
 } as const;
 
 const WALK_SPEED = 2.5;
@@ -72,6 +83,24 @@ const JUMP_SPEED = 8.6;
 const BODY_RADIUS = 0.42;
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
+
+/** Piecewise-linear sample of an authored root-motion curve. */
+function sampleMotion(values: number[], times: number[], time: number): number {
+  if (time <= times[0]) return values[0];
+
+  const last = times.length - 1;
+  if (time >= times[last]) return values[last];
+
+  for (let i = 1; i <= last; i += 1) {
+    if (time <= times[i]) {
+      const span = times[i] - times[i - 1] || 1;
+      const k = (time - times[i - 1]) / span;
+      return values[i - 1] + (values[i] - values[i - 1]) * k;
+    }
+  }
+
+  return values[last];
+}
 
 function pushOutOfBlockers(position: THREE.Vector3, blockers: Blocker[], radius: number): void {
   for (const blocker of blockers) {
@@ -112,7 +141,8 @@ export class Player {
     | ((position: THREE.Vector3, forward: THREE.Vector3, attack: AttackProfile, hitTargets: Set<object>) => void)
     | null = null;
 
-  private readonly velocity = new THREE.Vector3();
+  /** Exposed so the camera can recenter behind the direction of travel. */
+  readonly velocity = new THREE.Vector3();
   private readonly forward = new THREE.Vector3();
   private readonly right = new THREE.Vector3();
   private readonly direction = new THREE.Vector3();
@@ -129,8 +159,13 @@ export class Player {
   private blocking = false;
   private dodging = false;
   private dodgeTime = 0;
+  private dodgeDuration: number = DODGE.duration;
   private dodgeCooldown = 0;
+  private dodgeBuffer = 0;
+  private dodgeClip: string | null = null;
+  private dodgeMotion: DodgeMotion | null = null;
   private invulnerable = 0;
+  private lockTarget: { x: number; z: number } | null = null;
 
   constructor(
     rig: CharacterRig,
@@ -153,6 +188,23 @@ export class Player {
 
   get isDodging(): boolean {
     return this.dodging;
+  }
+
+  /** Clip currently driving the dodge, if any. */
+  get dodgingWith(): string | null {
+    return this.dodgeClip;
+  }
+
+  get isLockedOn(): boolean {
+    return this.lockTarget !== null;
+  }
+
+  /**
+   * Hard-lock facing. Movement stays camera-relative, so holding A/D strafes
+   * around the target while the character keeps facing it.
+   */
+  setLockTarget(target: { x: number; z: number } | null): void {
+    this.lockTarget = target;
   }
 
   /** Name of the clip currently driving the attack, if any. */
@@ -189,7 +241,9 @@ export class Player {
     if (this.direction.lengthSq() > 0.0001) this.direction.normalize();
 
     const wantsJump = input.takeJump();
-    const wantsDodge = input.takeDodge();
+    // Buffer the dodge briefly so a press during recovery is not swallowed.
+    if (input.takeDodge()) this.dodgeBuffer = 0.3;
+    this.dodgeBuffer = Math.max(0, this.dodgeBuffer - delta);
     const wantsHeavy = input.takeHeavy();
     const wantsAttack = input.takeAttack();
 
@@ -201,7 +255,8 @@ export class Player {
       this.lockTimer = 0.1;
     }
 
-    if (wantsDodge && this.canStartDodge()) {
+    if (this.dodgeBuffer > 0 && this.canStartDodge()) {
+      this.dodgeBuffer = 0;
       this.startDodge();
     }
 
@@ -210,7 +265,9 @@ export class Player {
       else if (wantsAttack) this.startAttack(ATTACKS.light, forward);
     }
 
-    if (!this.dodging) {
+    if (this.dodging) {
+      this.applyDodgeMotion(delta);
+    } else {
       // Keep an active guard intact through block-hit recoil if the button stays held.
       const canBlock = input.isBlocking() && this.grounded && !this.isAttacking;
       this.blocking = canBlock && (this.blocking || this.lockTimer <= 0);
@@ -235,6 +292,16 @@ export class Player {
       this.turnToward(targetYaw, delta, 13);
     }
 
+    // Locked-on: face the enemy instead of the travel direction, which makes
+    // sideways and backward input read as strafing and retreating.
+    if (this.lockTarget && !this.dodging) {
+      const targetYaw = Math.atan2(
+        this.lockTarget.x - this.position.x,
+        this.lockTarget.z - this.position.z,
+      );
+      this.turnToward(targetYaw, delta, 14);
+    }
+
     this.applyGroundAndGravity(delta);
     this.clampToArena();
     pushOutOfBlockers(this.position, this.world.blockers, BODY_RADIUS);
@@ -248,11 +315,12 @@ export class Player {
     this.rig.update(delta);
   }
 
-  takeDamage(amount: number, from: THREE.Vector3): void {
-    if (!this.alive) return;
+  /** Returns the damage actually taken, so the HUD can show the real number. */
+  takeDamage(amount: number, from: THREE.Vector3): number {
+    if (!this.alive) return 0;
 
     // Dodge i-frames: the roll is a real evasion, not just a cosmetic clip.
-    if (this.invulnerable > 0) return;
+    if (this.invulnerable > 0) return 0;
 
     const blocked = this.blocking;
     const applied = blocked ? amount * BLOCK.damageScale : amount;
@@ -266,12 +334,16 @@ export class Player {
       this.blocking = false;
       this.dodging = false;
       this.rig.animator.play('Death_A', { once: true, fade: 0.1, clamp: true });
-      return;
+      return applied;
     }
 
     if (blocked) {
       this.rig.animator.play(BLOCK.hitClip, { once: true, fade: 0.06, clamp: true });
       this.lockTimer = 0.28;
+    } else if (this.attack?.armored) {
+      // Hyper-armour: the heavy swing continues through the hit, so it is not
+      // cancelled a fraction of a second before its own strike lands.
+      this.lockTimer = 0.12;
     } else {
       this.attack = null;
       this.lockTimer = 0.26;
@@ -284,6 +356,8 @@ export class Player {
       this.velocity.x += knockback.x;
       this.velocity.z += knockback.z;
     }
+
+    return applied;
   }
 
   reset(): void {
@@ -298,7 +372,11 @@ export class Player {
     this.dodging = false;
     this.dodgeTime = 0;
     this.dodgeCooldown = 0;
+    this.dodgeBuffer = 0;
+    this.dodgeClip = null;
+    this.dodgeMotion = null;
     this.invulnerable = 0;
+    this.lockTarget = null;
     this.velocity.set(0, 0, 0);
     this.grounded = true;
     this.verticalSpeed = 0;
@@ -319,12 +397,14 @@ export class Player {
   }
 
   private canStartDodge(): boolean {
+    // A dodge may cancel attack recovery once the blade has already landed.
+    const recovering = this.attack !== null && this.attackTime > this.attack.hitStart / this.attack.timeScale;
+
     return (
       this.dodgeCooldown <= 0 &&
       !this.dodging &&
-      !this.isAttacking &&
-      this.grounded &&
-      this.lockTimer <= 0
+      (!this.isAttacking || recovering) &&
+      this.grounded
     );
   }
 
@@ -334,9 +414,16 @@ export class Player {
     this.hitTargets.clear();
     this.cooldown = profile.cooldown;
 
-    // Attacks commit toward current movement input, or camera facing when stationary.
-    const aim = this.direction.lengthSq() > 0.01 ? this.direction : cameraForward;
-    this.yaw = Math.atan2(aim.x, aim.z);
+    // Attacks commit to the locked target, else movement input, else camera facing.
+    if (this.lockTarget) {
+      this.yaw = Math.atan2(
+        this.lockTarget.x - this.position.x,
+        this.lockTarget.z - this.position.z,
+      );
+    } else {
+      const aim = this.direction.lengthSq() > 0.01 ? this.direction : cameraForward;
+      this.yaw = Math.atan2(aim.x, aim.z);
+    }
 
     this.rig.animator.play(profile.clip, {
       once: true,
@@ -351,17 +438,6 @@ export class Player {
       ? this.direction.clone()
       : this.facing(new THREE.Vector3());
 
-    // Root XZ translation is stripped from Dodge_* clips at load time, so the
-    // burst below is the sole world translation and stays aligned with the collider.
-    this.velocity.set(direction.x * DODGE.speed, 0, direction.z * DODGE.speed);
-    this.dodging = true;
-    this.dodgeTime = 0;
-    this.dodgeCooldown = DODGE.cooldown;
-    this.invulnerable = DODGE.invulnerable;
-    this.blocking = false;
-    this.attack = null;
-    this.hitTargets.clear();
-
     const forward = Math.sin(this.yaw) * direction.x + Math.cos(this.yaw) * direction.z;
     const strafe = -Math.cos(this.yaw) * direction.x + Math.sin(this.yaw) * direction.z;
     const clip =
@@ -373,18 +449,65 @@ export class Player {
           ? 'Dodge_Right'
           : 'Dodge_Left';
 
-    this.rig.animator.play(clip, { once: true, fade: 0.06, clamp: true });
+    this.dodging = true;
+    this.dodgeTime = 0;
+    this.dodgeClip = clip;
+    this.dodgeMotion = DODGE_MOTION.get(clip) ?? null;
+    this.dodgeDuration = Math.max(
+      0.18,
+      (this.rig.animator.clipDuration(clip) || DODGE.duration) / DODGE.timeScale,
+    );
+    this.dodgeCooldown = DODGE.cooldown;
+    this.invulnerable = Math.min(DODGE.invulnerable, this.dodgeDuration * 0.9);
+    this.blocking = false;
+    this.attack = null;
+    this.hitTargets.clear();
+
+    // Constant dash for the whole move: a decaying burst reads as a nudge, not
+    // a committed evade. The clip's own footwork is layered on top.
+    this.velocity.set(direction.x * DODGE.speed, 0, direction.z * DODGE.speed);
+
+    this.rig.animator.play(clip, {
+      once: true,
+      fade: 0.06,
+      clamp: true,
+      timeScale: DODGE.timeScale,
+    });
+  }
+
+  /**
+   * Replays the clip's authored root travel (stripped from the skeleton at load)
+   * rotated into the character's frame, so the feet and the body move together.
+   */
+  private applyDodgeMotion(delta: number): void {
+    const motion = this.dodgeMotion;
+    if (!motion) return;
+
+    const from = this.dodgeTime * DODGE.timeScale;
+    const to = Math.min(this.dodgeDuration, this.dodgeTime + delta) * DODGE.timeScale;
+
+    const stepX =
+      (sampleMotion(motion.x, motion.times, to) - sampleMotion(motion.x, motion.times, from)) * DODGE.reach;
+    const stepZ =
+      (sampleMotion(motion.z, motion.times, to) - sampleMotion(motion.z, motion.times, from)) * DODGE.reach;
+
+    // Local +x is the character's left, local +z is forward.
+    const cos = Math.cos(this.yaw);
+    const sin = Math.sin(this.yaw);
+    this.position.x += stepX * cos + stepZ * sin;
+    this.position.z += -stepX * sin + stepZ * cos;
   }
 
   private updateDodge(delta: number): void {
     if (!this.dodging) return;
 
     this.dodgeTime += delta;
-    const friction = Math.exp(-7 * delta);
-    this.velocity.x *= friction;
-    this.velocity.z *= friction;
-
-    if (this.dodgeTime >= DODGE.duration) this.dodging = false;
+    if (this.dodgeTime >= this.dodgeDuration) {
+      this.dodging = false;
+      this.dodgeMotion = null;
+      // Bleed the dash off so the character plants instead of coasting.
+      this.velocity.multiplyScalar(0.35);
+    }
   }
 
   private updateAttack(delta: number): void {
