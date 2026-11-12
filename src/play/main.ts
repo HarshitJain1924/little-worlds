@@ -5,7 +5,7 @@ import type { WeaponSpec } from './character';
 import { CharacterRig, SOCKETS, weaponFrom } from './character';
 import { InputController } from './input';
 import { ASSETS, loadClipSet, loadModel } from './models';
-import { ATTACK, Player } from './player';
+import { Player } from './player';
 import type { EnemyConfig } from './enemy';
 import { Enemy } from './enemy';
 import { ARENA, buildWorld } from './world';
@@ -76,6 +76,9 @@ const MINION: EnemyConfig = {
   aggroRadius: 9.5,
   attackRange: 2.3,
   attackCooldown: 1.45,
+  attackClip: 'Melee_1H_Attack_Slice_Diagonal',
+  attackStrike: 0.4,
+  attackTimeScale: 1,
 };
 
 const WARRIOR: EnemyConfig = {
@@ -86,6 +89,9 @@ const WARRIOR: EnemyConfig = {
   aggroRadius: 10.5,
   attackRange: 2.5,
   attackCooldown: 1.9,
+  attackClip: 'Melee_1H_Attack_Chop',
+  attackStrike: 0.6,
+  attackTimeScale: 0.95,
 };
 
 async function boot(): Promise<void> {
@@ -193,23 +199,28 @@ async function boot(): Promise<void> {
     document.querySelector<HTMLElement>('#stick'),
   );
 
-  player.onAttackHit = (position, forward) => {
+  player.onAttackHit = (position, forward, attack, hitTargets) => {
     let hits = 0;
 
     for (const enemy of enemies) {
-      if (!enemy.alive) continue;
+      if (!enemy.alive || hitTargets.has(enemy)) continue;
 
       const toEnemy = enemy.position.clone().sub(position).setY(0);
       const distance = toEnemy.length();
-      if (distance > ATTACK.range + 0.7) continue;
+      if (distance > attack.range + 0.7) continue;
 
-      toEnemy.normalize();
-      if (Math.acos(Math.min(1, Math.max(-1, toEnemy.dot(forward)))) > ATTACK.arc) continue;
+      if (distance > 0.001) {
+        toEnemy.normalize();
+        if (Math.acos(Math.min(1, Math.max(-1, toEnemy.dot(forward)))) > attack.arc) continue;
+      }
 
-      if (enemy.takeDamage(ATTACK.damage, position)) hits += 1;
+      if (enemy.takeDamage(attack.damage, position)) {
+        hitTargets.add(enemy);
+        hits += 1;
+      }
     }
 
-    if (hits > 0) cameraRig.shake(0.09);
+    if (hits > 0) cameraRig.shake(attack.damage >= 40 ? 0.15 : 0.09);
   };
 
   for (const enemy of enemies) {
@@ -367,6 +378,9 @@ async function boot(): Promise<void> {
         hp: Math.round(player.health),
         alive: player.alive,
         clip: playerRig.animator.playing,
+        attacking: player.isAttacking,
+        blocking: player.isBlocking,
+        dodging: player.isDodging,
       },
       enemies: enemies.map((enemy) => ({
         hp: Math.round(enemy.health),
@@ -392,12 +406,24 @@ async function boot(): Promise<void> {
     step: (
       frames: number,
       delta: number,
-      move: { x?: number; y?: number; run?: boolean; attack?: boolean; jump?: boolean } = {},
+      move: {
+        x?: number;
+        y?: number;
+        run?: boolean;
+        attack?: boolean;
+        heavy?: boolean;
+        dodge?: boolean;
+        block?: boolean;
+        jump?: boolean;
+      } = {},
     ) => {
       input.virtual.x = move.x ?? 0;
       input.virtual.y = move.y ?? 0;
       input.virtual.run = move.run ?? false;
+      input.virtual.block = move.block ?? false;
       if (move.attack) input.queueAttack();
+      if (move.heavy) input.queueHeavy();
+      if (move.dodge) input.queueDodge();
       if (move.jump) input.queueJump();
 
       for (let i = 0; i < frames; i += 1) stepWorld(delta);
@@ -414,6 +440,8 @@ async function boot(): Promise<void> {
         alive: player.alive,
         clip: playerRig.animator.playing,
         attacking: player.isAttacking,
+        blocking: player.isBlocking,
+        dodging: player.isDodging,
         enemies: enemies.map((enemy) => ({
           hp: Math.round(enemy.health),
           alive: enemy.alive,

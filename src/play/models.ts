@@ -9,6 +9,8 @@ export const ASSETS = {
   skeletonWarrior: './rpg/characters/Skeleton_Warrior.glb',
   rigGeneral: './rpg/anims/Rig_Medium_General.glb',
   rigMovement: './rpg/anims/Rig_Medium_MovementBasic.glb',
+  rigCombat: './rpg/anims/Rig_Medium_CombatMelee.glb',
+  rigMovementAdvanced: './rpg/anims/Rig_Medium_MovementAdvanced.glb',
   sword: './rpg/weapons/sword_A.gltf',
   shield: './rpg/weapons/shield_A.gltf',
   skeletonBlade: './rpg/weapons/Skeleton_Blade.gltf',
@@ -155,12 +157,32 @@ export function placeModel(
 }
 
 export async function loadClipSet(): Promise<Map<string, THREE.AnimationClip>> {
-  const [general, movement] = await Promise.all([
+  // All four KayKit rig files target the same 23-bone Rig_Medium skeleton, so a
+  // clip loaded from one plays on any character built on it.
+  const sources = await Promise.all([
     loadModel(ASSETS.rigGeneral),
     loadModel(ASSETS.rigMovement),
+    loadModel(ASSETS.rigCombat),
+    loadModel(ASSETS.rigMovementAdvanced),
   ]);
 
   const clips = new Map<string, THREE.AnimationClip>();
-  for (const clip of [...general.animations, ...movement.animations]) clips.set(clip.name, clip);
+  for (const source of sources) {
+    for (const clip of source.animations) {
+      // Dodge_* clips author horizontal displacement on the `root` bone; strip
+      // XZ so the physics collider in Player owns movement without visual snap-back.
+      if (clip.name.startsWith('Dodge_')) {
+        for (const track of clip.tracks) {
+          if (track.name === 'root.position') {
+            for (let i = 0; i < track.values.length; i += 3) {
+              track.values[i] = 0;
+              track.values[i + 2] = 0;
+            }
+          }
+        }
+      }
+      clips.set(clip.name, clip);
+    }
+  }
   return clips;
 }

@@ -11,13 +11,16 @@ export interface EnemyConfig {
   aggroRadius: number;
   attackRange: number;
   attackCooldown: number;
+  attackClip?: string;
+  /** Authored clip time (seconds) when the enemy weapon reaches the player. */
+  attackStrike?: number;
+  attackTimeScale?: number;
 }
 
 export type EnemyState = 'idle' | 'chase' | 'attack' | 'hurt' | 'dead';
 
-const ATTACK_WINDUP = 0.3;
-const ATTACK_LAND = 0.36;
-const ATTACK_RECOVER = 0.82;
+const DEFAULT_ATTACK_CLIP = 'Melee_1H_Attack_Slice_Diagonal';
+const DEFAULT_ATTACK_STRIKE = 0.4;
 const PATROL_RADIUS = 5;
 
 export class Enemy {
@@ -100,32 +103,47 @@ export class Enemy {
             this.state = 'attack';
             this.stateTimer = 0;
             this.attackLanded = false;
-            this.rig.animator.play('Idle_A', { fade: 0.12 });
+            this.rig.animator.play(this.config.attackClip ?? DEFAULT_ATTACK_CLIP, {
+              once: true,
+              fade: 0.1,
+              timeScale: this.config.attackTimeScale ?? 1,
+              clamp: true,
+            });
           } else {
             this.moveToward(playerPosition, this.config.speed, delta);
           }
           break;
 
-        case 'attack':
-          this.stateTimer += delta;
-          if (this.stateTimer > ATTACK_WINDUP) this.face(playerPosition, delta, 10);
-          this.rig.animator.setSwingPhase(Math.min(1, this.stateTimer / ATTACK_RECOVER));
+        case 'attack': {
+          const clip = this.config.attackClip ?? DEFAULT_ATTACK_CLIP;
+          const timeScale = this.config.attackTimeScale ?? 1;
+          const strikeAt = (this.config.attackStrike ?? DEFAULT_ATTACK_STRIKE) / timeScale;
+          const authored = this.rig.animator.clipDuration(clip);
+          const duration = Math.max(0.35, (authored || 1.0) / timeScale);
 
-          if (!this.attackLanded && this.stateTimer >= ATTACK_LAND) {
+          this.stateTimer += delta;
+          if (this.stateTimer < strikeAt * 0.85) this.face(playerPosition, delta, 10);
+
+          if (!this.attackLanded && this.stateTimer >= strikeAt) {
             this.attackLanded = true;
-            // Re-check the range at the moment of impact, not at windup.
-            if (distance < this.config.attackRange + 0.55 && playerAlive) {
+            // Re-check range and frontal arc at impact, not at windup.
+            const forwardX = Math.sin(this.yaw);
+            const forwardZ = Math.cos(this.yaw);
+            const inFront =
+              distance < 0.001 ||
+              (this.toPlayer.x * forwardX + this.toPlayer.z * forwardZ) / distance > 0;
+            if (distance < this.config.attackRange + 0.55 && inFront && playerAlive) {
               this.onHitPlayer?.(this.config.damage, this.position);
             }
           }
 
-          if (this.stateTimer >= ATTACK_RECOVER) {
-            this.rig.animator.setSwingPhase(null);
+          if (this.stateTimer >= duration) {
             this.cooldown = this.config.attackCooldown;
             this.state = 'chase';
             this.stateTimer = 0;
           }
           break;
+        }
 
         default:
           break;
@@ -162,7 +180,6 @@ export class Enemy {
     this.state = 'hurt';
     this.hurtTimer = 0.32;
     this.stateTimer = 0;
-    this.rig.animator.setSwingPhase(null);
     this.rig.animator.play('Hit_A', { once: true, fade: 0.06, clamp: true });
     return true;
   }
@@ -177,7 +194,6 @@ export class Enemy {
     this.attackLanded = false;
     this.position.copy(this.home);
     this.yaw = Math.PI;
-    this.rig.animator.setSwingPhase(null);
     this.rig.animator.play('Idle_A', { fade: 0.1 });
     this.rig.root.position.copy(this.position);
     this.rig.root.rotation.y = this.yaw;
@@ -186,7 +202,6 @@ export class Enemy {
   private die(): void {
     this.alive = false;
     this.state = 'dead';
-    this.rig.animator.setSwingPhase(null);
     this.rig.animator.play('Death_A', { once: true, fade: 0.1, clamp: true });
   }
 

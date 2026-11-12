@@ -43,79 +43,14 @@ export interface PlayOptions {
   clamp?: boolean;
 }
 
-/**
- * Bone-local euler deltas for the placeholder swing, keyed by normalised time.
- * The packs ship no attack clip, so this arm animation is generated in code and
- * is deliberately labelled a placeholder rather than passed off as animation.
- */
-type Channel = [time: number, x: number, y: number, z: number][];
-
-const SWING_CHANNELS: Record<string, Channel> = {
-  'upperarm.r': [
-    [0, 0, 0, 0],
-    [0.3, -1.15, 0.2, -0.55],
-    [0.52, 0.55, -0.15, 1.45],
-    [0.72, 0.35, -0.1, 1.05],
-    [1, 0, 0, 0],
-  ],
-  'lowerarm.r': [
-    [0, 0, 0, 0],
-    [0.3, -1.05, 0, 0],
-    [0.52, -0.15, 0, 0],
-    [1, 0, 0, 0],
-  ],
-  'hand.r': [
-    [0, 0, 0, 0],
-    [0.3, 0, 0, -0.35],
-    [0.52, 0, 0, 0.45],
-    [1, 0, 0, 0],
-  ],
-  hips: [
-    [0, 0, 0, 0],
-    [0.3, 0, 0.28, 0],
-    [0.55, 0, -0.34, 0],
-    [1, 0, 0, 0],
-  ],
-  spine: [
-    [0, 0, 0, 0],
-    [0.3, -0.08, 0.3, 0],
-    [0.55, 0.12, -0.4, 0],
-    [1, 0, 0, 0],
-  ],
-  chest: [
-    [0, 0, 0, 0],
-    [0.3, -0.06, 0.22, 0],
-    [0.55, 0.1, -0.3, 0],
-    [1, 0, 0, 0],
-  ],
-};
-
-const SWING_BONES = Object.keys(SWING_CHANNELS);
-
-function sampleChannel(channel: Channel, t: number): [number, number, number] {
-  for (let i = 1; i < channel.length; i += 1) {
-    const [time, x, y, z] = channel[i];
-    if (t <= time) {
-      const [prevTime, px, py, pz] = channel[i - 1];
-      const span = time - prevTime || 1;
-      const k = Math.min(1, Math.max(0, (t - prevTime) / span));
-      return [px + (x - px) * k, py + (y - py) * k, pz + (z - pz) * k];
-    }
-  }
-  return [0, 0, 0];
-}
-
 export class CharacterAnimator {
   private readonly mixer: THREE.AnimationMixer;
   private readonly actions = new Map<string, THREE.AnimationAction>();
   private readonly names = new Map<THREE.AnimationAction, string>();
-  private readonly swingBones = new Map<string, THREE.Object3D>();
-  private readonly euler = new THREE.Euler();
-  private readonly delta = new THREE.Quaternion();
 
   private current: THREE.AnimationAction | null = null;
   private currentName = '';
-  private swingPhase: number | null = null;
+  private readonly missingWarned = new Set<string>();
 
   /** Fired when a loop-once action reaches its end. */
   onFinished: ((name: string) => void) | null = null;
@@ -129,11 +64,6 @@ export class CharacterAnimator {
       const name = this.names.get((event as unknown as { action: THREE.AnimationAction }).action);
       if (name) this.onFinished?.(name);
     });
-
-    for (const name of SWING_BONES) {
-      const bone = findBone(root, name);
-      if (bone) this.swingBones.set(name, bone);
-    }
   }
 
   get playing(): string {
@@ -144,16 +74,33 @@ export class CharacterAnimator {
     return this.clips.has(name);
   }
 
+  /** Authored length of a clip in seconds (0 when the clip is absent). */
+  clipDuration(name: string): number {
+    return this.clips.get(name)?.duration ?? 0;
+  }
+
   play(name: string, options: PlayOptions = {}): void {
     const clip = this.clips.get(name);
-    if (!clip) return;
+    if (!clip) {
+      if (!this.missingWarned.has(name)) {
+        this.missingWarned.add(name);
+        console.warn(`Animation clip "${name}" is not loaded; keeping current pose.`);
+      }
+      return;
+    }
 
     const once = options.once ?? false;
 
+    // A looping state that is already active is never restarted: locomotion
+    // asks for the same clip every frame.
     if (!once && this.currentName === name) {
       if (this.current && options.timeScale !== undefined) this.current.timeScale = options.timeScale;
       return;
     }
+
+    // A one-shot that is still running is not restarted either, so holding the
+    // attack button cannot rewind the swing.
+    if (once && this.currentName === name && this.current?.isRunning()) return;
 
     const action = this.action(name);
     const fade = options.fade ?? 0.2;
@@ -171,14 +118,8 @@ export class CharacterAnimator {
     this.currentName = name;
   }
 
-  /** Drive the placeholder swing pose; null clears it. */
-  setSwingPhase(phase: number | null): void {
-    this.swingPhase = phase;
-  }
-
   update(delta: number): void {
     this.mixer.update(delta);
-    if (this.swingPhase !== null) this.applySwing(this.swingPhase);
   }
 
   dispose(): void {
@@ -197,24 +138,6 @@ export class CharacterAnimator {
     this.actions.set(name, action);
     this.names.set(action, name);
     return action;
-  }
-
-  /**
-   * Applied after the mixer, so the swing multiplies onto whatever pose the
-   * blend produced and then disappears cleanly when the phase is cleared.
-   */
-  private applySwing(phase: number): void {
-    for (const [name, channel] of Object.entries(SWING_CHANNELS)) {
-      const bone = this.swingBones.get(name);
-      if (!bone) continue;
-
-      const [x, y, z] = sampleChannel(channel, phase);
-      if (x === 0 && y === 0 && z === 0) continue;
-
-      this.euler.set(x, y, z);
-      this.delta.setFromEuler(this.euler);
-      bone.quaternion.multiply(this.delta);
-    }
   }
 }
 

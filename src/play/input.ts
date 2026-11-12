@@ -1,7 +1,8 @@
 /**
  * Keyboard, mouse and touch input.
  *
- * Mouse: drag to look, short click to attack, wheel to zoom.
+ * Mouse: left-drag to look, left-click to attack, right-hold to block, wheel to zoom.
+ * Keyboard: WASD move, Shift run, Space jump, J light, K heavy, F block, C/L dodge.
  * Touch: left half is a virtual stick, right half looks, two fingers pinch-zoom.
  */
 
@@ -24,11 +25,14 @@ export class InputController {
   readonly touchCapable = window.matchMedia('(pointer: coarse)').matches;
 
   /** Direct state injection for scripted verification; unused by real input. */
-  readonly virtual = { x: 0, y: 0, run: false };
+  readonly virtual = { x: 0, y: 0, run: false, block: false };
 
   private readonly held = new Set<string>();
   private attackQueued = false;
+  private heavyQueued = false;
+  private dodgeQueued = false;
   private jumpQueued = false;
+  private mouseBlock = false;
   private lookX = 0;
   private lookY = 0;
   private zoomQueued = 0;
@@ -90,6 +94,14 @@ export class InputController {
     this.attackQueued = true;
   }
 
+  queueHeavy(): void {
+    this.heavyQueued = true;
+  }
+
+  queueDodge(): void {
+    this.dodgeQueued = true;
+  }
+
   queueJump(): void {
     this.jumpQueued = true;
   }
@@ -113,10 +125,26 @@ export class InputController {
     return queued;
   }
 
+  takeHeavy(): boolean {
+    const queued = this.heavyQueued;
+    this.heavyQueued = false;
+    return queued;
+  }
+
+  takeDodge(): boolean {
+    const queued = this.dodgeQueued;
+    this.dodgeQueued = false;
+    return queued;
+  }
+
   takeJump(): boolean {
     const queued = this.jumpQueued;
     this.jumpQueued = false;
     return queued;
+  }
+
+  isBlocking(): boolean {
+    return this.held.has('f') || this.mouseBlock || this.virtual.block;
   }
 
   private readonly onKeyDown = (event: KeyboardEvent): void => {
@@ -127,6 +155,8 @@ export class InputController {
       if (!this.held.has(' ')) this.jumpQueued = true;
     }
     if (key === 'j' && !this.held.has('j')) this.attackQueued = true;
+    if (key === 'k' && !this.held.has('k')) this.heavyQueued = true;
+    if ((key === 'c' || key === 'l') && !this.held.has(key)) this.dodgeQueued = true;
 
     this.held.add(key);
   };
@@ -137,6 +167,7 @@ export class InputController {
 
   private readonly onBlur = (): void => {
     this.held.clear();
+    this.mouseBlock = false;
     this.stickId = null;
     this.lookId = null;
     this.touches.clear();
@@ -177,10 +208,15 @@ export class InputController {
       return;
     }
 
+    if (event.button === 2) {
+      this.mouseBlock = true;
+      return;
+    }
+
     this.lookId = event.pointerId;
     this.lookLast.x = event.clientX;
     this.lookLast.y = event.clientY;
-    this.tapCandidate = { x: event.clientX, y: event.clientY, time: performance.now() };
+    this.tapCandidate = event.button === 0 ? { x: event.clientX, y: event.clientY, time: performance.now() } : null;
   };
 
   private readonly onPointerMove = (event: PointerEvent): void => {
@@ -231,7 +267,12 @@ export class InputController {
       return;
     }
 
-    // A click that never moved is an attack, not a camera drag.
+    if (event.button === 2) {
+      this.mouseBlock = false;
+      return;
+    }
+
+    // A left click that never moved is an attack, not a camera drag.
     if (this.tapCandidate && event.pointerId === this.lookId) {
       const dx = event.clientX - this.tapCandidate.x;
       const dy = event.clientY - this.tapCandidate.y;
