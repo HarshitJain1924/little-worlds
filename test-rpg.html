@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Little Worlds — RPG integration test</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1117; }
+      body { font: 13px/1.4 ui-monospace, "SF Mono", Consolas, monospace; color: #e6edf3; }
+      #scene { display: block; width: 100%; height: 100%; }
+      .panel {
+        position: fixed; background: rgba(13, 17, 23, 0.82); border: 1px solid #30363d;
+        border-radius: 8px; padding: 10px 12px; backdrop-filter: blur(6px);
+      }
+      #hud { top: 12px; left: 12px; max-width: 320px; }
+      #hud h1 { margin: 0 0 6px; font-size: 13px; letter-spacing: 0.04em; text-transform: uppercase; color: #7ee2c4; }
+      #hud p { margin: 0; color: #8b949e; font-size: 11px; }
+      #stats { top: 12px; right: 12px; white-space: pre; font-size: 11px; color: #9aa4b2; }
+      #clips { bottom: 12px; left: 12px; right: 12px; display: flex; flex-wrap: wrap; gap: 6px; }
+      #clips button {
+        font: inherit; font-size: 11px; color: #e6edf3; background: #21262d;
+        border: 1px solid #30363d; border-radius: 999px; padding: 5px 11px; cursor: pointer;
+      }
+      #clips button[aria-pressed="true"] { background: #1f6f5c; border-color: #2ea043; color: #fff; }
+      #clips button:hover { border-color: #58a6ff; }
+      #error { display: none; top: 50%; left: 50%; transform: translate(-50%, -50%); max-width: 560px; color: #ff7b72; }
+      #error.show { display: block; }
+    </style>
+  </head>
+  <body>
+    <canvas id="scene"></canvas>
+    <div id="hud" class="panel">
+      <h1>RPG integration test</h1>
+      <p id="hint">Knight + Skeleton + KayKit Forest / Dungeon · temporary scene</p>
+    </div>
+    <div id="stats" class="panel">loading…</div>
+    <div id="clips" class="panel"></div>
+    <div id="error" class="panel"></div>
+    <script type="module" src="/src/test-rpg.ts"></script>
+  </body>
+</html>
