@@ -10,7 +10,7 @@ import { InputController } from './input';
 import { Sfx } from './sfx';
 import { CombatVfx } from './vfx';
 import { ASSETS, loadClipSet, loadModel } from './models';
-import { Player, handleAbilityHit } from './player';
+import { Player, handleAbilityHit, executeExplosionAoE } from './player';
 import type { EnemyConfig } from './enemy';
 import { Enemy } from './enemy';
 import { applyQuality, readQualityPreference, storeQualityPreference, type QualityLevel } from './quality';
@@ -18,7 +18,7 @@ import { TargetTracker } from './targeting';
 import { ARENA, buildWorld } from './world';
 import { Hud } from './hud';
 import { ADVENTURERS, findAdventurer, type CharacterId, type WeaponKey } from './roster';
-import { profileFor, type PiercingVolleyAbilityProfile } from './movesets';
+import { profileFor, type PiercingVolleyAbilityProfile, type ArcaneNovaAbilityProfile } from './movesets';
 import type { ArrowVisual, Impact, ProjectileVisual } from './projectiles';
 import { ProjectilePool } from './projectiles';
 import { solveShot, type AimSolution } from './aim';
@@ -264,6 +264,7 @@ async function boot(): Promise<void> {
   function createMagicVisuals(): {
     light: ProjectileVisual;
     heavy: ProjectileVisual;
+    arcaneOrb: ProjectileVisual;
   } {
     // Magic light bolt: an aerodynamic glowing arcane comet pointing forward (+Z)
     const lightGeom = new THREE.SphereGeometry(1, 12, 8);
@@ -281,9 +282,17 @@ async function boot(): Promise<void> {
       toneMapped: false,
     });
 
+    // Arcane Nova explosive orb: a large, glowing sphere of concentrated magical energy
+    const orbGeom = new THREE.SphereGeometry(0.48, 16, 14);
+    const orbMat = new THREE.MeshBasicMaterial({
+      color: 0xdf70ff,
+      toneMapped: false,
+    });
+
     return {
       light: { geometry: lightGeom, material: lightMat, offset: 0 },
       heavy: { geometry: heavyGeom, material: heavyMat, offset: 0 },
+      arcaneOrb: { geometry: orbGeom, material: orbMat, offset: 0 },
     };
   }
 
@@ -301,7 +310,14 @@ async function boot(): Promise<void> {
     piercingArrow: piercingVis,
     magicLight: magicVisuals.light,
     magicHeavy: magicVisuals.heavy,
+    arcaneOrb: magicVisuals.arcaneOrb,
   });
+
+  projectiles.onStep = (kind, pos) => {
+    if (kind === 'arcaneOrb') {
+      effects.spawnTrail(pos);
+    }
+  };
 
   /** Height of the aim ray's origin: the player's shoulder, not the camera boom. */
   const AIM_HEIGHT = 1.45;
@@ -404,18 +420,34 @@ async function boot(): Promise<void> {
 
     if (shotDirection.lengthSq() < 1e-6) return;
 
-    projectiles.spawn({
-      origin: shotOrigin,
-      direction: shotDirection,
-      speed: ability.speed,
-      damage: ability.damage,
-      maxRange: ability.maxRange,
-      kind: 'piercingArrow',
-      piercing: true,
-    });
+    if (ability.kind === 'volley') {
+      projectiles.spawn({
+        origin: shotOrigin,
+        direction: shotDirection,
+        speed: ability.speed,
+        damage: ability.damage,
+        maxRange: ability.maxRange,
+        kind: 'piercingArrow',
+        piercing: true,
+      });
 
-    sfx.piercingRelease();
-    cameraRig.shake(0.07);
+      sfx.piercingRelease();
+      cameraRig.shake(0.07);
+    } else if (ability.kind === 'nova') {
+      projectiles.spawn({
+        origin: shotOrigin,
+        direction: shotDirection,
+        speed: ability.speed,
+        damage: ability.damage,
+        maxRange: ability.maxRange,
+        kind: 'arcaneOrb',
+        explosive: true,
+      });
+
+      effects.hideChargeAura();
+      sfx.magicCast(true);
+      cameraRig.shake(0.12);
+    }
   };
 
   /**
@@ -546,8 +578,36 @@ async function boot(): Promise<void> {
     }
   };
 
-  /** Projectile impact feedback (arrows, piercing arrows, and magic bolts). Damage has already been applied. */
+  /** Projectile impact feedback (arrows, piercing arrows, magic bolts, and Arcane Nova explosive orb). */
   function onProjectileImpact(impact: Impact): void {
+    if (impact.shotKind === 'arcaneOrb') {
+      const novaRadius = (player.profile.ability as ArcaneNovaAbilityProfile)?.radius ?? 5.5;
+
+      // 1. Large purple magical explosion centered on the impact position
+      effects.spawnNova(impact.position, novaRadius);
+      vfx.spawn('impactHeavy', impact.position, player.yaw);
+      sfx.arcaneNovaBurst();
+      cameraRig.shake(0.28);
+
+      // 2. Centered AoE damage at impact position
+      executeExplosionAoE(
+        impact.position,
+        impact.damage,
+        novaRadius,
+        enemies,
+        world.obstacles,
+        2.0,
+        (enemy, dmg) => {
+          hud.damageNumber(enemy.position, dmg, 'dealt');
+          effects.spawn(enemy.position, 'magicHeavy');
+          sfx.magicHit(true);
+          hitStopTimer = Math.max(hitStopTimer, 0.08);
+          if (!enemy.alive) sfx.enemyDeath();
+        },
+      );
+      return;
+    }
+
     if (impact.kind === 'expired') return;
 
     const isMagic = impact.shotKind === 'magicLight' || impact.shotKind === 'magicHeavy';
@@ -737,9 +797,7 @@ async function boot(): Promise<void> {
 
   player.onAbilityRelease = (ability) => {
     if (ability.kind === 'nova') {
-      effects.spawnNova(player.position, ability.radius);
-      sfx.arcaneNovaBurst();
-      cameraRig.shake(0.26);
+      effects.hideChargeAura();
     }
   };
 
@@ -799,6 +857,7 @@ async function boot(): Promise<void> {
     player.reset();
     enemies.forEach((enemy) => enemy.reset());
     vfx.clear();
+    effects.hideChargeAura();
     projectiles.clear();
     slashPending = null;
     tracker.release();
@@ -888,11 +947,20 @@ async function boot(): Promise<void> {
     player.setLockTarget(locked ? locked.position : null);
     cameraRig.setLockTarget(locked ? locked.position : null);
 
-    const isVolleyAiming = player.isAbilityActive && player.currentAbility?.kind === 'volley';
-    cameraRig.setAiming(player.isAiming || isVolleyAiming);
+    const isRangedAbilityAiming =
+      player.isAbilityActive &&
+      (player.currentAbility?.kind === 'volley' || player.currentAbility?.kind === 'nova');
+    cameraRig.setAiming(player.isAiming || isRangedAbilityAiming);
     cameraRig.update(delta, player.position, player.velocity);
     effects.update(delta, cameraRig.camera);
     vfx.update(delta, cameraRig.camera);
+
+    if (player.isNovaCharging) {
+      player.muzzlePosition(scratchA);
+      effects.setChargeAura(scratchA, player.abilityChargeProgress);
+    } else {
+      effects.hideChargeAura();
+    }
 
     sun.position.copy(player.position).add(SUN_OFFSET);
     sun.target.position.copy(player.position);
@@ -903,10 +971,10 @@ async function boot(): Promise<void> {
     const showAim =
       (player.isAiming && player.profile.aim?.clip) ||
       (player.isCharging && activeCharacter === 'mage') ||
-      isVolleyAiming;
+      isRangedAbilityAiming;
     if (showAim) {
-      const ranged = isVolleyAiming
-        ? { maxRange: (player.currentAbility as PiercingVolleyAbilityProfile).maxRange }
+      const ranged = isRangedAbilityAiming
+        ? { maxRange: (player.currentAbility as PiercingVolleyAbilityProfile | ArcaneNovaAbilityProfile).maxRange }
         : player.isCharging
           ? player.profile.heavy.ranged
           : player.profile.light.ranged;
@@ -921,8 +989,8 @@ async function boot(): Promise<void> {
         window.innerWidth * 0.5,
         window.innerHeight * 0.5,
         solution.kind,
-        player.chargeProgress,
-        player.isCharging,
+        player.isCharging ? player.chargeProgress : player.abilityChargeProgress,
+        player.isCharging || player.isNovaCharging,
       );
     } else {
       hud.setAim(false, 0, 0, 'range', 0, false);

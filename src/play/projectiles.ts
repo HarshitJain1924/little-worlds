@@ -26,7 +26,7 @@ export interface ProjectileField {
   heightAt: (x: number, z: number) => number;
 }
 
-export type ProjectileKind = 'arrow' | 'magicLight' | 'magicHeavy' | 'piercingArrow';
+export type ProjectileKind = 'arrow' | 'magicLight' | 'magicHeavy' | 'piercingArrow' | 'arcaneOrb';
 
 export interface ProjectileVisual {
   geometry: THREE.BufferGeometry;
@@ -47,6 +47,7 @@ export interface Shot {
   maxRange: number;
   kind?: ProjectileKind;
   piercing?: boolean;
+  explosive?: boolean;
 }
 
 export type ImpactKind = 'target' | 'obstacle' | 'ground' | 'expired';
@@ -83,10 +84,12 @@ interface Arrow {
   maxRange: number;
   travelled: number;
   piercing: boolean;
+  explosive: boolean;
   readonly hitTargets: Set<ProjectileTarget>;
 }
 
 export class ProjectilePool {
+  onStep: ((kind: ProjectileKind, position: THREE.Vector3) => void) | null = null;
   private readonly arrows: Arrow[] = [];
   private readonly group = new THREE.Group();
   private readonly field: ProjectileField;
@@ -161,6 +164,7 @@ export class ProjectilePool {
         maxRange: 0,
         travelled: 0,
         piercing: false,
+        explosive: false,
         hitTargets: new Set<ProjectileTarget>(),
       });
     }
@@ -189,6 +193,7 @@ export class ProjectilePool {
     const kind = shot.kind ?? 'arrow';
     arrow.kind = kind;
     arrow.piercing = Boolean(shot.piercing);
+    arrow.explosive = Boolean(shot.explosive);
     arrow.hitTargets.clear();
     arrow.active = true;
     arrow.travelled = 0;
@@ -325,6 +330,7 @@ export class ProjectilePool {
         arrow.tip.copy(this.next);
         arrow.travelled += step;
         this.place(arrow);
+        this.onStep?.(arrow.kind, arrow.tip);
         continue;
       }
 
@@ -388,7 +394,9 @@ export class ProjectilePool {
         arrow.tip.lerpVectors(this.position, this.next, hitT);
         arrow.travelled += step * hitT;
 
-        if (kind === 'target' && struck) struck.takeDamage(arrow.damage, this.position);
+        if (!arrow.explosive && kind === 'target' && struck) {
+          struck.takeDamage(arrow.damage, this.position);
+        }
 
         this.place(arrow);
         this.retire(arrow);
@@ -405,6 +413,7 @@ export class ProjectilePool {
       arrow.tip.copy(this.next);
       arrow.travelled += step;
       this.place(arrow);
+      this.onStep?.(arrow.kind, arrow.tip);
     }
   }
 

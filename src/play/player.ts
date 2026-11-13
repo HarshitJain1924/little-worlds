@@ -62,6 +62,64 @@ export function handleAbilityHit(
 }
 
 /**
+ * Resolves an area-of-effect explosion:
+ * - Centered at impactPosition (never on the Mage).
+ * - Tests line of sight through obstacles from impactPosition to each candidate's chest.
+ * - Applies enemy.takeDamage(damage, impactPosition), knocking enemies radially away from the blast center.
+ * - Ensures each enemy is hit at most once.
+ * - Returns array of damaged enemies.
+ */
+export function executeExplosionAoE(
+  impactPosition: { x: number; y: number; z: number },
+  damage: number,
+  radius: number,
+  targets: readonly unknown[],
+  obstacles: readonly CameraObstacle[] = [],
+  maxVertical = 2.0,
+  onDamageApplied?: (enemy: Enemy, damage: number) => void,
+): Enemy[] {
+  const damagedEnemies: Enemy[] = [];
+  const radiusSq = radius * radius;
+  const originY = impactPosition.y + 0.2;
+
+  for (const candidate of targets) {
+    if (!candidate || typeof candidate !== 'object' || !('takeDamage' in candidate)) continue;
+    const enemy = candidate as Enemy;
+    if (!enemy.alive) continue;
+
+    const dy = Math.abs(enemy.position.y - impactPosition.y);
+    if (dy > maxVertical) continue;
+
+    const dx = enemy.position.x - impactPosition.x;
+    const dz = enemy.position.z - impactPosition.z;
+    const distSq = dx * dx + dz * dz;
+    if (distSq > radiusSq) continue;
+
+    if (
+      !hasLineOfSight(
+        impactPosition.x,
+        originY,
+        impactPosition.z,
+        enemy.position.x,
+        enemy.position.y + 1.2,
+        enemy.position.z,
+        obstacles,
+      )
+    ) {
+      continue;
+    }
+
+    const hitApplied = enemy.takeDamage(damage, impactPosition as THREE.Vector3);
+    if (hitApplied) {
+      damagedEnemies.push(enemy);
+      onDamageApplied?.(enemy, damage);
+    }
+  }
+
+  return damagedEnemies;
+}
+
+/**
  * Attack definitions. `hitStart`..`hitEnd` are the authored clip times (measured
  * from the keyframes in Rig_Medium_CombatMelee.glb) during which the weapon is
  * sweeping through the target zone, so damage never lands during windup.
@@ -175,8 +233,8 @@ export class Player {
    */
   onRangedShot: ((attack: AttackProfile) => void) | null = null;
 
-  /** Fired at the measured release frame of a ranged signature ability (e.g. Piercing Volley). */
-  onAbilityRangedShot: ((ability: PiercingVolleyAbilityProfile) => void) | null = null;
+  /** Fired at the measured release frame of a ranged signature ability (e.g. Piercing Volley, Arcane Nova). */
+  onAbilityRangedShot: ((ability: PiercingVolleyAbilityProfile | ArcaneNovaAbilityProfile) => void) | null = null;
   /** Fired at the moment an ability releases its blast or projectile (e.g. Arcane Nova burst). */
   onAbilityRelease: ((ability: AbilityProfile) => void) | null = null;
 
@@ -254,7 +312,8 @@ export class Player {
   private readonly shadowstepDashDir = new THREE.Vector3();
   private volleyReleaseStarted = false;
   private volleyReleaseFired = false;
-  private novaBurstFired = false;
+  private novaReleaseStarted = false;
+  private novaShotFired = false;
   private dodging = false;
   private dodgeTime = 0;
   private dodgeDuration: number = DODGE.duration;
@@ -349,6 +408,16 @@ export class Player {
 
   get currentAbility(): AbilityProfile | null {
     return this.abilityProfile ?? this.profile.ability ?? null;
+  }
+
+  get abilityChargeProgress(): number {
+    if (!this.isAbilityActive || this.abilityProfile?.kind !== 'nova') return 0;
+    const duration = this.abilityProfile.chargeDuration ?? this.abilityProfile.channelDuration ?? 0.60;
+    return Math.min(1, this.abilityTime / duration);
+  }
+
+  get isNovaCharging(): boolean {
+    return this.isAbilityActive && this.abilityProfile?.kind === 'nova' && this.abilityPhase === 'startup';
   }
 
   get currentAbilityCooldown(): number {
@@ -641,7 +710,7 @@ export class Player {
     } else if ((this.aiming || this.charging) && !this.isAbilityActive) {
       // Bow/staff up or charging: face the camera's aim, arriving at it rather than snapping.
       this.turnToward(Math.atan2(forward.x, forward.z), delta, 11);
-    } else if (this.isAbilityActive && this.abilityProfile?.kind === 'volley') {
+    } else if (this.isAbilityActive && (this.abilityProfile?.kind === 'volley' || this.abilityProfile?.kind === 'nova')) {
       if (this.lockTarget) {
         const targetYaw = Math.atan2(
           this.lockTarget.x - this.position.x,
@@ -650,17 +719,6 @@ export class Player {
         this.turnToward(targetYaw, delta, 14);
       } else {
         this.turnToward(Math.atan2(forward.x, forward.z), delta, 14);
-      }
-    } else if (this.isAbilityActive && this.abilityProfile?.kind === 'nova') {
-      if (this.lockTarget) {
-        const targetYaw = Math.atan2(
-          this.lockTarget.x - this.position.x,
-          this.lockTarget.z - this.position.z,
-        );
-        this.turnToward(targetYaw, delta, 14);
-      } else {
-        const targetDir = this.direction.lengthSq() > 0.01 ? this.direction : forward;
-        this.turnToward(Math.atan2(targetDir.x, targetDir.z), delta, 14);
       }
     }
 
@@ -912,7 +970,7 @@ export class Player {
         this.lockTarget.x - this.position.x,
         this.lockTarget.z - this.position.z,
       );
-    } else if (ability.kind === 'volley') {
+    } else if (ability.kind === 'volley' || ability.kind === 'nova') {
       this.yaw = Math.atan2(cameraForward.x, cameraForward.z);
     } else {
       const aim = this.direction.lengthSq() > 0.01 ? this.direction : cameraForward;
@@ -932,11 +990,13 @@ export class Player {
       this.shadowstepStepIndex = -1;
       this.initiateShadowstepStep(0, ability);
     } else if (ability.kind === 'nova') {
-      this.novaBurstFired = false;
-      this.rig.animator.play(ability.clip, {
+      this.novaReleaseStarted = false;
+      this.novaShotFired = false;
+      const chargeClip = ability.chargeClip ?? ability.clip ?? 'Ranged_Magic_Spellcasting';
+      this.rig.animator.play(chargeClip, {
         once: true,
         fade: 0.08,
-        timeScale: ability.timeScale,
+        timeScale: ability.timeScale ?? 1,
         clamp: true,
       });
     } else {
@@ -964,7 +1024,8 @@ export class Player {
     this.shadowstepHitThisStep = false;
     this.volleyReleaseStarted = false;
     this.volleyReleaseFired = false;
-    this.novaBurstFired = false;
+    this.novaReleaseStarted = false;
+    this.novaShotFired = false;
   }
 
   private updateAbility(delta: number): void {
@@ -1022,16 +1083,32 @@ export class Player {
 
   private updateNova(ability: ArcaneNovaAbilityProfile): void {
     const time = this.abilityTime;
-    const channelDuration = ability.channelDuration;
-    const activeEnd = ability.activeEnd;
+    const chargeDuration = ability.chargeDuration ?? ability.channelDuration ?? 0.60;
+    const releaseTime = ability.releaseTime;
+    const releaseTimeScale = ability.releaseTimeScale ?? 1.4;
+    const activeEnd = ability.activeEnd ?? (chargeDuration + 0.45);
     const totalDuration = ability.duration;
+    const releaseClip = ability.releaseClip ?? 'Ranged_Magic_Shoot';
 
-    if (time >= ability.releaseTime && !this.novaBurstFired) {
-      this.novaBurstFired = true;
-      this.executeArcaneNovaBurst(ability);
+    // Transition to forward cast release clip once energy charging finishes
+    if (time >= chargeDuration && !this.novaReleaseStarted) {
+      this.novaReleaseStarted = true;
+      this.rig.animator.play(releaseClip, {
+        once: true,
+        fade: 0.05,
+        timeScale: releaseTimeScale,
+        clamp: true,
+      });
     }
 
-    if (time < channelDuration) {
+    // Launch explosive projectile at measured release timing
+    if (time >= releaseTime && !this.novaShotFired) {
+      this.novaShotFired = true;
+      this.onAbilityRangedShot?.(ability);
+      this.onAbilityRelease?.(ability);
+    }
+
+    if (time < chargeDuration) {
       this.abilityPhase = 'startup';
     } else if (time < activeEnd) {
       this.abilityPhase = 'active';
@@ -1039,50 +1116,6 @@ export class Player {
       this.abilityPhase = 'recovery';
     } else {
       this.interruptAbility();
-    }
-  }
-
-  private executeArcaneNovaBurst(ability: ArcaneNovaAbilityProfile): void {
-    this.onAbilityRelease?.(ability);
-
-    if (!this.findAreaTargets) return;
-    const candidates = this.findAreaTargets();
-    if (!Array.isArray(candidates)) return;
-
-    const maxVertical = ability.maxVerticalOffset ?? 1.8;
-    const radiusSq = ability.radius * ability.radius;
-
-    for (const candidate of candidates) {
-      if (!candidate || typeof candidate !== 'object') continue;
-      if (this.abilityHitTargets.has(candidate)) continue;
-
-      const enemyObj = candidate as { alive?: boolean; position?: THREE.Vector3 };
-      if (enemyObj.alive === false || !enemyObj.position) continue;
-
-      const dy = Math.abs(enemyObj.position.y - this.position.y);
-      if (dy > maxVertical) continue;
-
-      const dx = enemyObj.position.x - this.position.x;
-      const dz = enemyObj.position.z - this.position.z;
-      const distSq = dx * dx + dz * dz;
-      if (distSq > radiusSq) continue;
-
-      // Obstacle line-of-sight check: do not hit through walls or solid obstacles
-      const clear =
-        !this.world.obstacles ||
-        hasLineOfSight(
-          this.position.x,
-          this.position.y + 1.2,
-          this.position.z,
-          enemyObj.position.x,
-          enemyObj.position.y + 1.2,
-          enemyObj.position.z,
-          this.world.obstacles,
-        );
-      if (!clear) continue;
-
-      this.abilityHitTargets.add(candidate);
-      this.onAbilityHit?.(candidate, ability);
     }
   }
 

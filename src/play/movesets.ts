@@ -148,15 +148,21 @@ export interface ArcaneNovaAbilityProfile {
   name: string;
   description: string;
   cooldown: number;
-  clip: string;
+  chargeClip?: string;
+  releaseClip?: string;
+  clip?: string;
   duration: number;
   timeScale: number;
   armored?: boolean;
-  channelDuration: number;
+  chargeDuration?: number;
+  channelDuration?: number;
   releaseTime: number;
-  activeEnd: number;
+  releaseTimeScale?: number;
+  activeEnd?: number;
   radius: number;
   damage: number;
+  speed: number;
+  maxRange: number;
   maxVerticalOffset?: number;
   moveScale?: number;
 }
@@ -387,38 +393,49 @@ export const RANGER_ABILITY: PiercingVolleyAbilityProfile = {
 };
 
 /**
- * Authored timings inside `Ranged_Magic_Spellcasting_Long`, measured from the staff and
- * skeletal keyframes: the Mage raises the staff aloft and channels concentrated mana
- * (0.00..1.40s authored; 0.00..0.70s at 2.0x), strikes the staff into the ground to detonate
- * the Arcane Nova (peak extension at 1.567s authored; 0.78s at 2.0x), with hyper-armoured
- * follow-through ending at 1.90s authored (0.95s at 2.0x), and recovers to standing by 2.50s (1.25s).
+ * Authored timings for Mage's Arcane Nova:
+ * Mage begins charging concentrated arcane energy at the staff crystal (0.00..0.60s),
+ * transitions into a forward staff release (Ranged_Magic_Shoot at 1.4x speed),
+ * launching an explosive arcane orb along the aim sightline at 0.80s (0.60 + 0.20s),
+ * with follow-through ending at 1.05s and full recovery by 1.20s.
  */
-export const MAGE_NOVA_TIME_SCALE = 2.0;
-export const MAGE_NOVA_CHANNEL_DURATION = 0.70;
-export const MAGE_NOVA_RELEASE_TIME = 0.78;
-export const MAGE_NOVA_ACTIVE_END = 0.95;
-export const MAGE_NOVA_TOTAL_DURATION = 1.25;
+export const MAGE_NOVA_CHARGE_CLIP = 'Ranged_Magic_Spellcasting';
+export const MAGE_NOVA_RELEASE_CLIP = 'Ranged_Magic_Shoot';
+export const MAGE_NOVA_TIME_SCALE = 1.0;
+export const MAGE_NOVA_CHARGE_DURATION = 0.60;
+export const MAGE_NOVA_CHANNEL_DURATION = 0.60;
+export const MAGE_NOVA_RELEASE_TIME = 0.80;
+export const MAGE_NOVA_ACTIVE_END = 1.05;
+export const MAGE_NOVA_TOTAL_DURATION = 1.20;
 export const MAGE_NOVA_RADIUS = 5.5;
-export const MAGE_NOVA_DAMAGE = 58;
-export const MAGE_NOVA_COOLDOWN = 9.0;
-export const MAGE_NOVA_MAX_VERTICAL = 1.8;
-export const MAGE_NOVA_MOVE_SCALE = 0.2;
+export const MAGE_NOVA_DAMAGE = 65;
+export const MAGE_NOVA_COOLDOWN = 8.5;
+export const MAGE_NOVA_SPEED = 28;
+export const MAGE_NOVA_MAX_RANGE = 35;
+export const MAGE_NOVA_MAX_VERTICAL = 2.0;
+export const MAGE_NOVA_MOVE_SCALE = 0.25;
 
 export const MAGE_ABILITY: ArcaneNovaAbilityProfile = {
   kind: 'nova',
   id: 'arcane_nova',
   name: 'Arcane Nova',
-  description: 'Channel concentrated mana through the staff and unleash a devastating radial burst of arcane energy.',
+  description: 'Charge concentrated arcane energy at the staff crystal and launch a devastating explosive orb that detonates on impact.',
   cooldown: MAGE_NOVA_COOLDOWN,
-  clip: 'Ranged_Magic_Spellcasting_Long',
+  chargeClip: MAGE_NOVA_CHARGE_CLIP,
+  releaseClip: MAGE_NOVA_RELEASE_CLIP,
+  clip: MAGE_NOVA_CHARGE_CLIP,
   duration: MAGE_NOVA_TOTAL_DURATION,
   timeScale: MAGE_NOVA_TIME_SCALE,
-  armored: true,
-  channelDuration: MAGE_NOVA_CHANNEL_DURATION,
+  armored: false,
+  chargeDuration: MAGE_NOVA_CHARGE_DURATION,
+  channelDuration: MAGE_NOVA_CHARGE_DURATION,
   releaseTime: MAGE_NOVA_RELEASE_TIME,
+  releaseTimeScale: 1.4,
   activeEnd: MAGE_NOVA_ACTIVE_END,
   radius: MAGE_NOVA_RADIUS,
   damage: MAGE_NOVA_DAMAGE,
+  speed: MAGE_NOVA_SPEED,
+  maxRange: MAGE_NOVA_MAX_RANGE,
   maxVerticalOffset: MAGE_NOVA_MAX_VERTICAL,
   moveScale: MAGE_NOVA_MOVE_SCALE,
 };

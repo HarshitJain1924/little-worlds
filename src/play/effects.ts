@@ -39,6 +39,20 @@ interface NovaEffect {
   active: boolean;
 }
 
+interface ChargeAura {
+  mesh: THREE.Mesh;
+  material: THREE.MeshBasicMaterial;
+  active: boolean;
+}
+
+interface TrailParticle {
+  mesh: THREE.Mesh;
+  material: THREE.MeshBasicMaterial;
+  age: number;
+  life: number;
+  active: boolean;
+}
+
 const COLORS: Record<ImpactKind, number> = {
   hit: 0xffd7a0,
   heavy: 0xffb066,
@@ -50,19 +64,25 @@ const COLORS: Record<ImpactKind, number> = {
 const BURST_COUNT = 8;
 const TELEGRAPH_COUNT = 3;
 const NOVA_COUNT = 3;
+const TRAIL_COUNT = 16;
 
 export class CombatEffects {
   private readonly group = new THREE.Group();
   private readonly bursts: Burst[] = [];
   private readonly telegraphs: Telegraph[] = [];
   private readonly novaEffects: NovaEffect[] = [];
+  private readonly chargeAura: ChargeAura;
+  private readonly trails: TrailParticle[] = [];
   private readonly impactGeometry = new THREE.RingGeometry(0.16, 0.26, 20);
   private readonly groundGeometry = new THREE.RingGeometry(0.62, 0.74, 28);
   private readonly novaRingGeometry = new THREE.RingGeometry(0.88, 1.0, 48);
   private readonly novaCoreGeometry = new THREE.RingGeometry(0.04, 1.0, 32);
   private readonly novaFlareGeometry = new THREE.RingGeometry(0.2, 1.0, 24);
+  private readonly chargeGeometry = new THREE.SphereGeometry(1, 16, 12);
+  private readonly trailGeometry = new THREE.RingGeometry(0.08, 0.32, 16);
   private cursor = 0;
   private novaCursor = 0;
+  private trailCursor = 0;
 
   constructor(scene: THREE.Scene) {
     this.group.name = 'combat-effects';
@@ -176,6 +196,74 @@ export class CombatEffects {
         active: false,
       });
     }
+
+    const chargeMat = new THREE.MeshBasicMaterial({
+      color: 0xee88ff,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      toneMapped: false,
+    });
+    const chargeMesh = new THREE.Mesh(this.chargeGeometry, chargeMat);
+    chargeMesh.visible = false;
+    chargeMesh.frustumCulled = false;
+    chargeMesh.renderOrder = 6;
+    this.group.add(chargeMesh);
+    this.chargeAura = { mesh: chargeMesh, material: chargeMat, active: false };
+
+    for (let i = 0; i < TRAIL_COUNT; i += 1) {
+      const material = new THREE.MeshBasicMaterial({
+        color: 0xdf70ff,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        toneMapped: false,
+      });
+      const mesh = new THREE.Mesh(this.trailGeometry, material);
+      mesh.visible = false;
+      mesh.frustumCulled = false;
+      mesh.renderOrder = 4;
+      this.group.add(mesh);
+      this.trails.push({ mesh, material, age: 0, life: 0.28, active: false });
+    }
+  }
+
+  /**
+   * Energy gathering around the staff crystal during Arcane Nova charging.
+   */
+  setChargeAura(position: { x: number; y: number; z: number }, progress: number): void {
+    this.chargeAura.active = true;
+    this.chargeAura.mesh.position.set(position.x, position.y, position.z);
+    this.chargeAura.mesh.visible = true;
+    const clamped = Math.min(1, Math.max(0, progress));
+    const scale = 0.16 + 0.38 * clamped;
+    this.chargeAura.mesh.scale.set(scale, scale, scale);
+    const pulse = 0.65 + 0.35 * Math.sin(clamped * 28);
+    this.chargeAura.material.opacity = pulse;
+  }
+
+  hideChargeAura(): void {
+    this.chargeAura.active = false;
+    this.chargeAura.mesh.visible = false;
+    this.chargeAura.material.opacity = 0;
+  }
+
+  /**
+   * Leaves a fading magical particle along an in-flight orb projectile.
+   */
+  spawnTrail(position: { x: number; y: number; z: number }): void {
+    const trail = this.trails[this.trailCursor % this.trails.length];
+    this.trailCursor += 1;
+    trail.age = 0;
+    trail.life = 0.26;
+    trail.active = true;
+    trail.mesh.position.set(position.x, position.y, position.z);
+    trail.mesh.scale.set(0.65, 0.65, 0.65);
+    trail.material.opacity = 0.85;
+    trail.mesh.visible = true;
   }
 
   /**
@@ -308,6 +396,20 @@ export class CombatEffects {
       nova.flareMesh.scale.setScalar(0.6 + 2.0 * flareT);
       nova.flareMaterial.opacity = 0.8 * (1 - flareT);
     }
+
+    for (const trail of this.trails) {
+      if (!trail.active) continue;
+      trail.age += delta;
+      if (trail.age >= trail.life) {
+        trail.active = false;
+        trail.mesh.visible = false;
+        continue;
+      }
+      const t = trail.age / trail.life;
+      trail.mesh.quaternion.copy(camera.quaternion);
+      trail.mesh.scale.setScalar(0.65 * (1 - 0.45 * t));
+      trail.material.opacity = 0.85 * (1 - t * t);
+    }
   }
 
   dispose(): void {
@@ -316,6 +418,9 @@ export class CombatEffects {
     this.novaRingGeometry.dispose();
     this.novaCoreGeometry.dispose();
     this.novaFlareGeometry.dispose();
+    this.chargeGeometry.dispose();
+    this.trailGeometry.dispose();
+    this.chargeAura.material.dispose();
     for (const burst of this.bursts) burst.material.dispose();
     for (const telegraph of this.telegraphs) telegraph.material.dispose();
     for (const nova of this.novaEffects) {
@@ -323,5 +428,6 @@ export class CombatEffects {
       nova.coreMaterial.dispose();
       nova.flareMaterial.dispose();
     }
+    for (const trail of this.trails) trail.material.dispose();
   }
 }
