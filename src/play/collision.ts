@@ -365,15 +365,16 @@ function rimDistSq(
   dy: number,
   Rc: number,
 ): number {
-  const u = Math.max(0, h2 * t * t + h1 * t + h0);
-  const deltaH = Math.max(0, Math.sqrt(u) - Rc);
+  const u = h2 * t * t + h1 * t + h0;
+  const deltaH = Math.sqrt(Math.max(0, u)) - Rc;
   const y = p0y + dy * t;
   return deltaH * deltaH + y * y;
 }
 
 /**
- * Exact derivative of squared distance to the rim circle with respect to parameter t.
- * Strictly monotonic along any straight line in the rim region, enabling exact root solving.
+ * Derivative of squared distance to the rim circle with respect to parameter t.
+ * This is used only on intervals where the horizontal clamp is inactive
+ * (sqrt(u) >= Rc), where the distance function is convex.
  */
 function rimFPrime(
   t: number,
@@ -384,18 +385,45 @@ function rimFPrime(
   p0DotD: number,
   Rc: number,
 ): number {
-  const u = Math.max(1e-12, h2 * t * t + h1 * t + h0);
+  const u = Math.max(1e-30, h2 * t * t + h1 * t + h0);
   const sqrtU = Math.sqrt(u);
   const uPrime = 2 * h2 * t + h1;
   const wPrime = 2 * (d2 * t + p0DotD);
   return wPrime - Rc * (uPrime / sqrtU);
 }
 
+function addQuadraticRoots(
+  roots: number[],
+  a: number,
+  b: number,
+  c: number,
+  low: number,
+  high: number,
+): void {
+  if (Math.abs(a) < 1e-14) {
+    if (Math.abs(b) >= 1e-14) {
+      const t = -c / b;
+      if (t > low && t < high) roots.push(t);
+    }
+    return;
+  }
+
+  const discriminant = b * b - 4 * a * c;
+  if (discriminant < 0) return;
+  const sqrtDiscriminant = Math.sqrt(Math.max(0, discriminant));
+  const t1 = (-b - sqrtDiscriminant) / (2 * a);
+  const t2 = (-b + sqrtDiscriminant) / (2 * a);
+  if (t1 > low && t1 < high) roots.push(t1);
+  if (t2 > low && t2 < high && Math.abs(t2 - t1) > 1e-14) roots.push(t2);
+}
+
 /**
  * Exact continuous swept-sphere vs cylinder rim quarter-torus intersection.
  * Finds the earliest parameter t in [tIn, tOut] where distance to the rim circle is <= R.
- * Uses exact derivative bisection to locate the unique point of closest approach t*,
- * guaranteeing narrow contact intervals and tangent contacts cannot be missed.
+ * Splits the interval at every change in the active distance region. On each
+ * rounded-rim interval, the squared distance is convex because rho >= Rc;
+ * derivative bisection therefore finds that interval's global minimum, after
+ * which a second bracket finds the earliest threshold crossing.
  */
 function intersectCylinderRim(
   fromX: number,
@@ -408,6 +436,7 @@ function intersectCylinderRim(
   cylZ: number,
   Rc: number,
   yCap: number,
+  capSide: 1 | -1,
   R: number,
   tIn: number,
   tOut: number,
@@ -425,50 +454,95 @@ function intersectCylinderRim(
 
   const low = tIn;
   const high = tOut;
+  const radiusSq = Rc * Rc;
+  const thresholdSq = R * R;
+  const roots = [low, high];
 
-  const fpLow = rimFPrime(low, h2, h1, h0, d2, p0DotD, Rc);
-  const fpHigh = rimFPrime(high, h2, h1, h0, d2, p0DotD, Rc);
+  // The formula with the horizontal clamp changes at rho = Rc. The cap-side
+  // formula changes at y = 0 relative to the selected rim circle.
+  addQuadraticRoots(roots, h2, h1, h0 - radiusSq, low, high);
+  if (Math.abs(dy) >= 1e-14) {
+    const capCrossing = -p0y / dy;
+    if (capCrossing > low && capCrossing < high) roots.push(capCrossing);
+  }
+  roots.sort((a, b) => a - b);
 
-  let tStar: number;
-  if (fpLow >= 0) {
-    tStar = low;
-  } else if (fpHigh <= 0) {
-    tStar = high;
-  } else {
-    let a = low;
-    let b = high;
-    for (let i = 0; i < 32; i += 1) {
-      const mid = (a + b) * 0.5;
-      if (rimFPrime(mid, h2, h1, h0, d2, p0DotD, Rc) <= 0) {
-        a = mid;
-      } else {
-        b = mid;
+  const uniqueRoots: number[] = [];
+  for (const root of roots) {
+    if (uniqueRoots.length === 0 || Math.abs(root - uniqueRoots[uniqueRoots.length - 1]) > 1e-13) {
+      uniqueRoots.push(root);
+    }
+  }
+
+  const isRimRegion = (t: number): boolean => {
+    const u = h2 * t * t + h1 * t + h0;
+    const y = p0y + dy * t;
+    return u >= radiusSq - 1e-12 && capSide * y >= -1e-12;
+  };
+
+  // Check exact region boundaries as they are reached. This includes a
+  // tangent that occurs exactly at a clamp transition, while preserving the
+  // earliest contact from the preceding interval.
+  if (
+    isRimRegion(uniqueRoots[0]) &&
+    rimDistSq(uniqueRoots[0], h2, h1, h0, p0y, dy, Rc) <= thresholdSq + 1e-10
+  ) {
+    return uniqueRoots[0];
+  }
+  for (let interval = 0; interval + 1 < uniqueRoots.length; interval += 1) {
+    const a = uniqueRoots[interval];
+    const b = uniqueRoots[interval + 1];
+    const mid = (a + b) * 0.5;
+    if (!isRimRegion(mid)) {
+      if (
+        isRimRegion(b) &&
+        rimDistSq(b, h2, h1, h0, p0y, dy, Rc) <= thresholdSq + 1e-10
+      ) {
+        return b;
       }
+      continue;
     }
-    tStar = (a + b) * 0.5;
-  }
 
-  const minDistSq = rimDistSq(tStar, h2, h1, h0, p0y, dy, Rc);
-  if (minDistSq > R * R + 1e-10) {
-    return 1;
-  }
-
-  if (rimDistSq(low, h2, h1, h0, p0y, dy, Rc) <= R * R) {
-    return low;
-  }
-
-  let rootA = low;
-  let rootB = tStar;
-  for (let i = 0; i < 32; i += 1) {
-    const mid = (rootA + rootB) * 0.5;
-    if (rimDistSq(mid, h2, h1, h0, p0y, dy, Rc) <= R * R) {
-      rootB = mid;
+    const fPrimeA = rimFPrime(a, h2, h1, h0, d2, p0DotD, Rc);
+    const fPrimeB = rimFPrime(b, h2, h1, h0, d2, p0DotD, Rc);
+    let tStar: number;
+    if (fPrimeA >= 0) {
+      tStar = a;
+    } else if (fPrimeB <= 0) {
+      tStar = b;
     } else {
-      rootA = mid;
+      let left = a;
+      let right = b;
+      for (let i = 0; i < 64; i += 1) {
+        const candidate = (left + right) * 0.5;
+        if (rimFPrime(candidate, h2, h1, h0, d2, p0DotD, Rc) <= 0) left = candidate;
+        else right = candidate;
+      }
+      tStar = (left + right) * 0.5;
     }
+
+    if (rimDistSq(tStar, h2, h1, h0, p0y, dy, Rc) > thresholdSq + 1e-10) {
+      if (
+        isRimRegion(b) &&
+        rimDistSq(b, h2, h1, h0, p0y, dy, Rc) <= thresholdSq + 1e-10
+      ) {
+        return b;
+      }
+      continue;
+    }
+
+    let left = a;
+    if (rimDistSq(left, h2, h1, h0, p0y, dy, Rc) <= thresholdSq + 1e-10) return left;
+    let right = tStar;
+    for (let i = 0; i < 64; i += 1) {
+      const candidate = (left + right) * 0.5;
+      if (rimDistSq(candidate, h2, h1, h0, p0y, dy, Rc) <= thresholdSq + 1e-10) right = candidate;
+      else left = candidate;
+    }
+    return right;
   }
 
-  return rootB;
+  return 1;
 }
 
 /** Same contract as segmentBoxEntry, for a vertical cylinder. */
@@ -593,6 +667,7 @@ export function segmentCylinderEntry(
     cylinder.z,
     cylinder.radius,
     primaryCap,
+    primaryCap === cylinder.top ? 1 : -1,
     R,
     clampIn,
     clampOut,
@@ -611,6 +686,7 @@ export function segmentCylinderEntry(
       cylinder.z,
       cylinder.radius,
       secondaryCap,
+      secondaryCap === cylinder.top ? 1 : -1,
       R,
       clampIn,
       clampOut,

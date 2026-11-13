@@ -466,6 +466,58 @@ test('Exact tangent contact on the rounded upper rim', () => {
   assert.ok(Math.abs(contact.z - 0) < 1e-5);
 });
 
+test('Regression: diagonal trajectory entering upper rim and ending inside cylinder', () => {
+  const cylinder: CylinderObstacle = {
+    kind: 'cylinder',
+    x: 0,
+    z: 0,
+    radius: 1.0,
+    bottom: 0,
+    top: 2.0,
+  };
+  const R = 0.5;
+
+  // Independent distance-to-cylinder calculation gives the first contact at
+  // t = 0.42150273751850725 on the rounded upper rim.
+  const t = segmentCylinderEntry(2.479, 2.686, 0.743, -0.030, 1.309, 0.030, cylinder, R);
+  assert.ok(t < 1, 'Trajectory entering the expanded cylinder must collide');
+  assert.ok(Math.abs(t - 0.42150273751850725) < 1e-8, `Expected earliest t≈0.4215027375, got ${t}`);
+});
+
+test('Rounded upper and lower rims remain correct after crossing into the horizontal radius', () => {
+  const cylinder: CylinderObstacle = {
+    kind: 'cylinder',
+    x: 0,
+    z: 0,
+    radius: 1.0,
+    bottom: 0,
+    top: 2.0,
+  };
+  const R = 0.5;
+
+  // Both paths enter through a rounded rim while rho > 1, cross rho = 1,
+  // and finish inside the actual cylinder. The expected t values come from
+  // independently solving (rho(t) - 1)^2 + (y(t) - cap)^2 = R^2.
+  const upper = segmentCylinderEntry(1.8, 2.4, 0.4, 0.2, 1.0, 0.1, cylinder, R);
+  const lower = segmentCylinderEntry(1.8, -0.4, 0.4, 0.2, 1.0, 0.1, cylinder, R);
+  assert.ok(Math.abs(upper - 0.21712770246755658) < 1e-8, `Expected upper-rim entry, got ${upper}`);
+  assert.ok(Math.abs(lower - 0.21712770246755658) < 1e-8, `Expected lower-rim entry, got ${lower}`);
+});
+
+test('Crossing the horizontal axis outside the vertical cylinder range is a miss', () => {
+  const cylinder: CylinderObstacle = {
+    kind: 'cylinder',
+    x: 0,
+    z: 0,
+    radius: 1.0,
+    bottom: 0,
+    top: 2.0,
+  };
+
+  const t = segmentCylinderEntry(2, 3, -2, -2, 3, 2, cylinder, 0.5);
+  assert.equal(t, 1, 'Axis crossing one metre above the upper rim must miss');
+});
+
 test('Exact tangent contact on the rounded lower rim', () => {
   const cylinder: CylinderObstacle = {
     kind: 'cylinder',
