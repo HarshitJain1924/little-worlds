@@ -50,6 +50,19 @@ export class Sfx {
     this.noise(0.05, 0.06, 'bandpass', 1400, 420);
   }
 
+  /** Magic projectile loosed from staff: resonant rising chime and arcane whoosh. */
+  magicCast(heavy: boolean): void {
+    this.tone(heavy ? 220 : 360, heavy ? 580 : 780, heavy ? 0.2 : 0.14, heavy ? 0.14 : 0.08, 'sine');
+    this.noise(heavy ? 0.16 : 0.1, heavy ? 0.08 : 0.05, 'bandpass', heavy ? 1800 : 2600, heavy ? 800 : 1200);
+  }
+
+  /** Magic impact against enemy, wall or ground: crystal burst and resonant ping. */
+  magicHit(heavy: boolean): void {
+    this.tone(heavy ? 420 : 540, heavy ? 90 : 180, heavy ? 0.24 : 0.14, heavy ? 0.18 : 0.1, 'sine');
+    this.tone(heavy ? 840 : 1080, heavy ? 220 : 360, heavy ? 0.18 : 0.09, heavy ? 0.08 : 0.04, 'triangle');
+    this.noise(heavy ? 0.2 : 0.1, heavy ? 0.12 : 0.07, heavy ? 'lowpass' : 'bandpass', heavy ? 1800 : 2200, heavy ? 250 : 600);
+  }
+
   /** Shield ringing off a blow. */
   block(): void {
     this.tone(520, 470, 0.12, 0.06, 'triangle');

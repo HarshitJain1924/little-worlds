@@ -19,7 +19,7 @@ import { ARENA, buildWorld } from './world';
 import { Hud } from './hud';
 import { ADVENTURERS, findAdventurer, type CharacterId, type WeaponKey } from './roster';
 import { profileFor } from './movesets';
-import type { ArrowVisual, Impact } from './projectiles';
+import type { ArrowVisual, Impact, ProjectileVisual } from './projectiles';
 import { ProjectilePool } from './projectiles';
 import { solveShot, type AimSolution } from './aim';
 
@@ -261,12 +261,44 @@ async function boot(): Promise<void> {
     return { geometry: first.geometry, material };
   }
 
-  const projectiles = new ProjectilePool(scene, world, arrowVisual(arrowGltf));
+  function createMagicVisuals(): {
+    light: ProjectileVisual;
+    heavy: ProjectileVisual;
+  } {
+    // Magic light bolt: an aerodynamic glowing arcane comet pointing forward (+Z)
+    const lightGeom = new THREE.SphereGeometry(1, 12, 8);
+    lightGeom.scale(0.18, 0.18, 0.36);
+    const lightMat = new THREE.MeshBasicMaterial({
+      color: 0xc4a3ff,
+      toneMapped: false,
+    });
+
+    // Magic heavy bolt: a dense, powerful sphere of concentrated magical energy
+    const heavyGeom = new THREE.SphereGeometry(1, 16, 12);
+    heavyGeom.scale(0.38, 0.38, 0.52);
+    const heavyMat = new THREE.MeshBasicMaterial({
+      color: 0xee88ff,
+      toneMapped: false,
+    });
+
+    return {
+      light: { geometry: lightGeom, material: lightMat, offset: 0 },
+      heavy: { geometry: heavyGeom, material: heavyMat, offset: 0 },
+    };
+  }
+
+  const magicVisuals = createMagicVisuals();
+  const projectiles = new ProjectilePool(scene, world, {
+    arrow: arrowVisual(arrowGltf),
+    magicLight: magicVisuals.light,
+    magicHeavy: magicVisuals.heavy,
+  });
 
   /** Height of the aim ray's origin: the player's shoulder, not the camera boom. */
   const AIM_HEIGHT = 1.45;
-  const aimRay = new THREE.Vector3();
   const aimCamera = new THREE.Vector3();
+  const cameraPos = new THREE.Vector3();
+  const cameraRay = new THREE.Vector3();
   const aimPoint = new THREE.Vector3();
   const shotOrigin = new THREE.Vector3();
   const shotDirection = new THREE.Vector3();
@@ -276,32 +308,62 @@ async function boot(): Promise<void> {
   /**
    * Where the camera forward ray first meets the world: an obstacle, the ground,
    * or nothing within range. Firing at this point (rather than parallel to the
-   * view) is what makes pitch matter.
+   * view) is what makes pitch matter and aligns the reticle with projectile flight.
    */
   function solvePlayerAim(maxRange: number): AimSolution {
+    cameraRig.camera.getWorldPosition(cameraPos);
     cameraRig.camera.getWorldDirection(aimCamera);
-    aimRay.set(player.position.x, player.position.y + AIM_HEIGHT, player.position.z);
-    player.weaponHand(muzzle);
-    muzzle.y += 0.06;
+    player.muzzlePosition(muzzle);
+
+    let aimSolution: AimSolution;
 
     // Free aim uses the camera centre. Lock-on only supplies a preferred point;
     // the shared solver still decides whether the body is actually reachable.
     const locked = tracker.locked;
     if (locked && locked.alive) {
       aimReference.set(locked.position.x, locked.position.y + 1.05, locked.position.z);
+      aimSolution = { kind: 'enemy', target: locked, distance: muzzle.distanceTo(aimReference) };
     } else {
-      aimReference.copy(aimRay).addScaledVector(aimCamera, maxRange);
+      // Free aim: raycast from the camera sightline forward from the player's depth.
+      // This matches what the screen-centred crosshair points at, eliminating
+      // the third-person shoulder parallax error while ignoring anything behind the avatar.
+      const depth = Math.max(
+        0,
+        (player.position.x - cameraPos.x) * aimCamera.x +
+        (player.position.y + AIM_HEIGHT - cameraPos.y) * aimCamera.y +
+        (player.position.z - cameraPos.z) * aimCamera.z,
+      );
+      cameraRay.copy(cameraPos).addScaledVector(aimCamera, depth);
+      aimSolution = solveShot(cameraRay, aimCamera, world, enemies, maxRange, aimReference);
+      if (aimSolution.kind === 'range') {
+        aimReference.copy(cameraRay).addScaledVector(aimCamera, maxRange);
+      } else if (aimSolution.kind === 'enemy' && aimSolution.target) {
+        aimReference.y = THREE.MathUtils.clamp(
+          aimReference.y,
+          aimSolution.target.position.y + 0.5,
+          aimSolution.target.position.y + 1.6,
+        );
+      }
     }
 
     shotDirection.copy(aimReference).sub(muzzle);
     if (shotDirection.lengthSq() < 1e-6) shotDirection.copy(aimCamera);
     shotDirection.normalize();
-    shotOrigin.copy(muzzle).addScaledVector(shotDirection, 0.4);
-    // Re-solve from the projectile's real starting point. The second pass
-    // removes the small muzzle offset from the preview/flight disagreement.
-    solveShot(shotOrigin, shotDirection, world, enemies, maxRange, aimPoint);
-    shotDirection.copy(aimPoint).sub(shotOrigin).normalize();
-    return solveShot(shotOrigin, shotDirection, world, enemies, maxRange, aimPoint);
+
+    const clearance = activeCharacter === 'mage' ? 0.1 : 0.4;
+    shotOrigin.copy(muzzle).addScaledVector(shotDirection, clearance);
+
+    // Solve from the projectile's actual origin. If cover/wall blocks the muzzle,
+    // the shot stops at the obstruction and reports 'obstacle'.
+    const shotSolution = solveShot(shotOrigin, shotDirection, world, enemies, maxRange, aimPoint);
+
+    if (aimSolution.kind === 'enemy' && shotSolution.kind === 'enemy') {
+      return shotSolution;
+    }
+    if (shotSolution.kind === 'obstacle') {
+      return shotSolution;
+    }
+    return shotSolution.kind !== 'range' ? shotSolution : aimSolution;
   }
 
   player.onRangedShot = (attack) => {
@@ -310,10 +372,10 @@ async function boot(): Promise<void> {
 
     solvePlayerAim(ranged.maxRange);
 
-    shotDirection.copy(aimPoint).sub(shotOrigin);
     if (shotDirection.lengthSq() < 1e-6) return;
-    shotDirection.normalize();
-    shotOrigin.copy(muzzle).addScaledVector(shotDirection, 0.4);
+
+    const heavy = attack.tag === 'heavy';
+    const isMage = activeCharacter === 'mage';
 
     projectiles.spawn({
       origin: shotOrigin,
@@ -321,11 +383,17 @@ async function boot(): Promise<void> {
       speed: ranged.speed,
       damage: attack.damage,
       maxRange: ranged.maxRange,
+      kind: isMage ? (heavy ? 'magicHeavy' : 'magicLight') : 'arrow',
     });
 
-    const heavy = attack.tag === 'heavy';
-    sfx.bowRelease(heavy);
-    cameraRig.shake(heavy ? 0.06 : 0.035);
+    if (isMage) {
+      effects.spawn(shotOrigin, heavy ? 'magicHeavy' : 'magic');
+      sfx.magicCast(heavy);
+      cameraRig.shake(heavy ? 0.08 : 0.04);
+    } else {
+      sfx.bowRelease(heavy);
+      cameraRig.shake(heavy ? 0.06 : 0.035);
+    }
   };
 
   /**
@@ -443,35 +511,54 @@ async function boot(): Promise<void> {
 
   player.onAttackStart = (attack) => {
     const heavy = attack === player.profile.heavy;
-    sfx.swing(heavy);
-    slashPending = {
-      remaining: Math.max(0, attack.hitStart / attack.timeScale - SLASH_LEAD),
-      kind: heavy ? 'slashHeavy' : 'slashLight',
-      clip: attack.clip,
-    };
+    if (!attack.ranged) {
+      sfx.swing(heavy);
+      slashPending = {
+        remaining: Math.max(0, attack.hitStart / attack.timeScale - SLASH_LEAD),
+        kind: heavy ? 'slashHeavy' : 'slashLight',
+        clip: attack.clip,
+      };
+    }
   };
 
-  /** Arrow feedback. Damage has already been applied when this runs. */
-  function onArrowImpact(impact: Impact): void {
+  /** Projectile impact feedback (arrows and magic bolts). Damage has already been applied. */
+  function onProjectileImpact(impact: Impact): void {
     if (impact.kind === 'expired') return;
+
+    const isMagic = impact.shotKind === 'magicLight' || impact.shotKind === 'magicHeavy';
+    const isHeavy = impact.shotKind === 'magicHeavy';
 
     if (impact.kind === 'target' && impact.target) {
       const enemy = impact.target as Enemy;
       hud.damageNumber(enemy.position, impact.damage, 'dealt');
-      effects.spawn(enemy.position, 'hit');
-      vfx.spawn('impact', impact.position, player.yaw);
-      sfx.arrowHit();
-      hitStopTimer = Math.max(hitStopTimer, 0.03);
-      cameraRig.shake(0.05);
+
+      if (isMagic) {
+        effects.spawn(enemy.position, isHeavy ? 'magicHeavy' : 'magic');
+        vfx.spawn(isHeavy ? 'impactHeavy' : 'impact', impact.position, player.yaw);
+        sfx.magicHit(isHeavy);
+        hitStopTimer = Math.max(hitStopTimer, isHeavy ? 0.05 : 0.03);
+        cameraRig.shake(isHeavy ? 0.08 : 0.05);
+      } else {
+        effects.spawn(enemy.position, 'hit');
+        vfx.spawn('impact', impact.position, player.yaw);
+        sfx.arrowHit();
+        hitStopTimer = Math.max(hitStopTimer, 0.03);
+        cameraRig.shake(0.05);
+      }
+
       if (!enemy.alive) sfx.enemyDeath();
       return;
     }
 
-    // Wall, pillar, trunk or ground: the arrow stops there. Only the flipbook
-    // spark is used, because the ring pool sits at chest height and would float
-    // above a ground strike.
-    vfx.spawn('impact', impact.position, player.yaw);
-    sfx.arrowHit();
+    // Wall, pillar, trunk or ground: the projectile stops there.
+    if (isMagic) {
+      effects.spawn(impact.position, isHeavy ? 'magicHeavy' : 'magic');
+      vfx.spawn(isHeavy ? 'impactHeavy' : 'impact', impact.position, player.yaw);
+      sfx.magicHit(isHeavy);
+    } else {
+      vfx.spawn('impact', impact.position, player.yaw);
+      sfx.arrowHit();
+    }
   }
 
   player.onDodgeStart = () => {
@@ -630,7 +717,7 @@ async function boot(): Promise<void> {
       }
     }
 
-    projectiles.update(delta, enemies, onArrowImpact);
+    projectiles.update(delta, enemies, onProjectileImpact);
 
     for (const enemy of enemies) enemy.update(delta, player.position, player.alive);
 

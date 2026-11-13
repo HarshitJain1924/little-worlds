@@ -65,6 +65,8 @@ export interface ChargeProfile {
   maxSpeed: number;
   /** Clip played once while drawing from the hip (not when already aiming). */
   drawClip: string;
+  /** Authored timestamp to hold when charge is held past this duration. */
+  clampTime?: number;
 }
 
 /**
@@ -76,6 +78,14 @@ export const BOW_LOOSE = 0.28;
 export const BOW_RELEASE_SWEEP = 0.65;
 
 /**
+ * Authored timings inside `Ranged_Magic_Shoot`, measured from the staff's
+ * keyframes: the forward thrust snaps and completes its release at 0.28 s
+ * (the cast release) and finishes its forward sweep at 0.60 s.
+ */
+export const MAGE_CAST_RELEASE = 0.28;
+export const MAGE_CAST_SWEEP = 0.60;
+
+/**
  * Seconds an attack must stay active for the release sweep to finish.
  * The follow-through is the whole point of the clip, so no bow profile may end
  * before the string hand has completed its travel.
@@ -84,7 +94,7 @@ export function releaseDuration(attack: { timeScale: number }): number {
   return BOW_RELEASE_SWEEP / attack.timeScale + 0.02;
 }
 
-export type CombatProfileId = 'knight' | 'barbarian' | 'rogue' | 'ranger';
+export type CombatProfileId = 'knight' | 'barbarian' | 'rogue' | 'ranger' | 'mage';
 
 /** Knight's shipped values. This is the regression baseline: do not retune. */
 const KNIGHT_LIGHT: AttackProfile = {
@@ -271,12 +281,58 @@ export const PROFILES: Record<CombatProfileId, CombatProfile> = {
       drawClip: 'Ranged_Bow_Draw',
     },
   },
+
+  /**
+   * Mage combat identity: ranged spellcaster with responsive magic bolts and
+   * charged heavy spells. The staff's cast release was measured at 0.28 s
+   * from the forward thrust keyframes of Ranged_Magic_Shoot.
+   */
+  mage: {
+    id: 'mage',
+    light: {
+      clip: 'Ranged_Magic_Shoot',
+      damage: 16,
+      range: 38,
+      arc: 0,
+      hitStart: MAGE_CAST_RELEASE,
+      hitEnd: MAGE_CAST_RELEASE,
+      timeScale: 1.35,
+      cooldown: 0.58,
+      recovery: 0.24,
+      ranged: { speed: 32, maxRange: 38 },
+      tag: 'light',
+    },
+    heavy: {
+      clip: 'Ranged_Magic_Shoot',
+      damage: 48,
+      range: 48,
+      arc: 0,
+      hitStart: MAGE_CAST_RELEASE,
+      hitEnd: MAGE_CAST_RELEASE,
+      timeScale: 0.95,
+      cooldown: 1.15,
+      recovery: 0.36,
+      armored: true,
+      ranged: { speed: 44, maxRange: 48 },
+      tag: 'heavy',
+    },
+    guard: null,
+    aim: { clip: 'Ranged_Magic_Spellcasting', moveScale: 0.45 },
+    charge: {
+      minTime: 0.25,
+      maxTime: 1.0,
+      minDamage: 24,
+      maxDamage: 48,
+      minSpeed: 28,
+      maxSpeed: 44,
+      drawClip: 'Ranged_Magic_Raise',
+      clampTime: 0.95,
+    },
+  },
 };
 
 /**
- * M7.1/M7.2 only define the melee identities and the Ranger's bow. The Mage
- * keeps the Knight's baseline until its own milestone, so switching stays
- * functional and behaviour is unchanged.
+ * Returns the combat profile for the active Adventurer.
  */
 export function profileFor(id: CharacterId): CombatProfile {
   return (PROFILES as Record<string, CombatProfile | undefined>)[id] ?? PROFILES.knight;

@@ -299,6 +299,41 @@ export class Player {
     else out.copy(this.position).setY(this.position.y + 1.1);
   }
 
+  /**
+   * World position of the staff's casting point (the crystal tip).
+   * Returns false if no staff is equipped, falling back to the weapon hand.
+   */
+  staffCastingPoint(out: THREE.Vector3): boolean {
+    if (this.handSlot === undefined) {
+      this.handSlot = findBone(this.rig.root, 'handslot.r') ?? null;
+    }
+
+    if (this.handSlot) {
+      const staff = this.handSlot.getObjectByName('staff') ?? this.handSlot.children[0];
+      if (staff) {
+        // Staff crystal tip is at local (0, 1.25, 0) in the authored staff model.
+        out.set(0, 1.25, 0);
+        staff.localToWorld(out);
+        return true;
+      }
+    }
+
+    this.weaponHand(out);
+    return false;
+  }
+
+  /**
+   * World position where a ranged projectile leaves the character:
+   * for the Mage, the staff's actual crystal tip; for the Ranger, the weapon hand.
+   */
+  muzzlePosition(out: THREE.Vector3): void {
+    if (this.profile.id === 'mage') {
+      if (this.staffCastingPoint(out)) return;
+    }
+    this.weaponHand(out);
+    out.y += 0.06;
+  }
+
   update(delta: number, input: InputController, camera: ThirdPersonCamera): void {
     this.cooldown = Math.max(0, this.cooldown - delta);
     this.lockTimer = Math.max(0, this.lockTimer - delta);
@@ -409,9 +444,9 @@ export class Player {
 
     this.speed = Math.hypot(this.velocity.x, this.velocity.z);
 
-    // While the bow is up the aim owns the facing, so travel must not drag the
+    // While the bow/staff is up or charging, the aim owns the facing, so travel must not drag the
     // body around and make the stance oscillate.
-    if (!this.isAttacking && !this.dodging && !this.aiming && this.direction.lengthSq() > 0.01) {
+    if (!this.isAttacking && !this.dodging && !this.aiming && !this.charging && this.direction.lengthSq() > 0.01) {
       const targetYaw = Math.atan2(this.direction.x, this.direction.z);
       this.turnToward(targetYaw, delta, 13);
     }
@@ -424,8 +459,8 @@ export class Player {
         this.lockTarget.z - this.position.z,
       );
       this.turnToward(targetYaw, delta, 14);
-    } else if (this.aiming) {
-      // Bow up: face the camera's aim, arriving at it rather than snapping.
+    } else if (this.aiming || this.charging) {
+      // Bow/staff up or charging: face the camera's aim, arriving at it rather than snapping.
       this.turnToward(Math.atan2(forward.x, forward.z), delta, 11);
     }
 
@@ -566,6 +601,12 @@ export class Player {
 
     if (input.isHeavyHeld()) {
       this.chargeTime = Math.min(charge.maxTime, this.chargeTime + delta);
+      if (charge.clampTime !== undefined && this.chargeTime >= charge.clampTime) {
+        (this.rig.animator as unknown as { clampAt?: (name: string, time: number) => void }).clampAt?.(
+          charge.drawClip,
+          charge.clampTime,
+        );
+      }
       return;
     }
 
@@ -640,9 +681,12 @@ export class Player {
         this.lockTarget.z - this.position.z,
       );
     } else if (profile.ranged) {
-      // A bow shot must not spin the body. The aim stance already turns toward
-      // the camera at a limited rate; firing leaves the facing exactly where it
-      // is, and the arrow follows the aim regardless of the body's angle.
+      // In aim stance, facing already tracks the camera smoothly.
+      // If hip-firing without aim stance or lock-on, orient the character
+      // toward the camera facing so the attack faces the crosshair.
+      if (!this.aiming) {
+        this.yaw = Math.atan2(cameraForward.x, cameraForward.z);
+      }
     } else {
       const aim = this.direction.lengthSq() > 0.01 ? this.direction : cameraForward;
       this.yaw = Math.atan2(aim.x, aim.z);

@@ -125,6 +125,15 @@ export class CharacterAnimator {
     this.mixer.update(delta);
   }
 
+  /** Freezes the specified clip at a target timestamp (used for held charge poses). */
+  clampAt(name: string, time: number): void {
+    const action = this.actions.get(name);
+    if (action && action.time >= time) {
+      action.time = time;
+      action.paused = true;
+    }
+  }
+
   dispose(): void {
     this.mixer.stopAllAction();
     this.mixer.uncacheRoot(this.mixer.getRoot() as THREE.Object3D);

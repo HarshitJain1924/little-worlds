@@ -26,11 +26,17 @@ export interface ProjectileField {
   heightAt: (x: number, z: number) => number;
 }
 
-/** Shared geometry and material for every arrow in the pool. */
-export interface ArrowVisual {
+export type ProjectileKind = 'arrow' | 'magicLight' | 'magicHeavy';
+
+export interface ProjectileVisual {
   geometry: THREE.BufferGeometry;
   material: THREE.Material;
+  offset?: number;
 }
+
+/** Shared geometry and material for every arrow in the pool. */
+export type ArrowVisual = ProjectileVisual;
+export type ProjectileVisualMap = Partial<Record<ProjectileKind, ProjectileVisual>>;
 
 export interface Shot {
   origin: Readonly<THREE.Vector3>;
@@ -39,12 +45,14 @@ export interface Shot {
   speed: number;
   damage: number;
   maxRange: number;
+  kind?: ProjectileKind;
 }
 
 export type ImpactKind = 'target' | 'obstacle' | 'ground' | 'expired';
 
 export interface Impact {
   kind: ImpactKind;
+  shotKind: ProjectileKind;
   /** Impact point. Reused between calls — copy it if it is kept. */
   position: THREE.Vector3;
   damage: number;
@@ -63,7 +71,9 @@ const DEFAULT_CAPACITY = 16;
 const FORWARD = new THREE.Vector3(0, 0, 1);
 
 interface Arrow {
-  mesh: THREE.Mesh;
+  meshes: Map<ProjectileKind, THREE.Mesh>;
+  activeMesh: THREE.Mesh | null;
+  kind: ProjectileKind;
   readonly tip: THREE.Vector3;
   readonly direction: THREE.Vector3;
   active: boolean;
@@ -77,7 +87,7 @@ export class ProjectilePool {
   private readonly arrows: Arrow[] = [];
   private readonly group = new THREE.Group();
   private readonly field: ProjectileField;
-  private readonly visual: ArrowVisual;
+  private readonly visuals = new Map<ProjectileKind, ProjectileVisual>();
   private readonly position = new THREE.Vector3();
   private readonly next = new THREE.Vector3();
   private readonly cylinder = {
@@ -89,20 +99,55 @@ export class ProjectilePool {
     top: 0,
   };
 
-  constructor(scene: THREE.Scene, field: ProjectileField, visual: ArrowVisual, capacity = DEFAULT_CAPACITY) {
+  constructor(
+    scene: THREE.Scene,
+    field: ProjectileField,
+    visual: ProjectileVisual | ProjectileVisualMap,
+    capacity = DEFAULT_CAPACITY,
+  ) {
     this.field = field;
-    this.visual = visual;
     this.group.name = 'projectiles';
     scene.add(this.group);
 
+    const isSingle = 'geometry' in visual;
+    if (isSingle) {
+      this.visuals.set('arrow', {
+        geometry: visual.geometry,
+        material: visual.material,
+        offset: visual.offset ?? -ARROW_HALF_LENGTH,
+      });
+    } else {
+      for (const [k, v] of Object.entries(visual) as [ProjectileKind, ProjectileVisual | undefined][]) {
+        if (!v) continue;
+        const defaultOffset = k === 'arrow' ? -ARROW_HALF_LENGTH : 0;
+        this.visuals.set(k, {
+          geometry: v.geometry,
+          material: v.material,
+          offset: v.offset ?? defaultOffset,
+        });
+      }
+    }
+
+    if (!this.visuals.has('arrow')) {
+      const fallback = this.visuals.values().next().value;
+      if (fallback) this.visuals.set('arrow', fallback);
+    }
+
     for (let i = 0; i < capacity; i += 1) {
-      const mesh = new THREE.Mesh(visual.geometry, visual.material);
-      mesh.visible = false;
-      mesh.castShadow = false;
-      mesh.receiveShadow = false;
-      this.group.add(mesh);
+      const meshes = new Map<ProjectileKind, THREE.Mesh>();
+      for (const [kind, def] of this.visuals) {
+        const mesh = new THREE.Mesh(def.geometry, def.material);
+        mesh.visible = false;
+        mesh.castShadow = false;
+        mesh.receiveShadow = false;
+        this.group.add(mesh);
+        meshes.set(kind, mesh);
+      }
+
       this.arrows.push({
-        mesh,
+        meshes,
+        activeMesh: null,
+        kind: 'arrow',
         tip: new THREE.Vector3(),
         direction: new THREE.Vector3(),
         active: false,
@@ -121,13 +166,15 @@ export class ProjectilePool {
   }
 
   /**
-   * Fires an arrow. Returns false only when every slot is somehow unavailable,
+   * Fires a projectile. Returns false only when every slot is somehow unavailable,
    * which the recycling rule below makes practically impossible.
    */
   spawn(shot: Shot): boolean {
     const arrow = this.arrows.find((entry) => !entry.active) ?? this.farthest();
     if (!arrow) return false;
 
+    const kind = shot.kind ?? 'arrow';
+    arrow.kind = kind;
     arrow.active = true;
     arrow.travelled = 0;
     arrow.speed = shot.speed;
@@ -136,9 +183,13 @@ export class ProjectilePool {
     arrow.direction.copy(shot.direction).normalize();
     arrow.tip.copy(shot.origin);
 
-    arrow.mesh.visible = true;
-    arrow.mesh.quaternion.setFromUnitVectors(FORWARD, arrow.direction);
-    this.place(arrow);
+    const activeMesh = arrow.meshes.get(kind) ?? arrow.meshes.get('arrow');
+    if (activeMesh) {
+      arrow.activeMesh = activeMesh;
+      activeMesh.visible = true;
+      activeMesh.quaternion.setFromUnitVectors(FORWARD, arrow.direction);
+      this.place(arrow);
+    }
     return true;
   }
 
@@ -155,7 +206,13 @@ export class ProjectilePool {
       const remaining = arrow.maxRange - arrow.travelled;
       if (remaining <= 0) {
         this.retire(arrow);
-        onImpact({ kind: 'expired', position: arrow.tip, damage: arrow.damage, target: null });
+        onImpact({
+          kind: 'expired',
+          shotKind: arrow.kind,
+          position: arrow.tip,
+          damage: arrow.damage,
+          target: null,
+        });
         continue;
       }
 
@@ -227,7 +284,13 @@ export class ProjectilePool {
 
         this.place(arrow);
         this.retire(arrow);
-        onImpact({ kind, position: arrow.tip, damage: arrow.damage, target: struck });
+        onImpact({
+          kind,
+          shotKind: arrow.kind,
+          position: arrow.tip,
+          damage: arrow.damage,
+          target: struck,
+        });
         continue;
       }
 
@@ -246,18 +309,27 @@ export class ProjectilePool {
     this.group.removeFromParent();
     this.group.clear();
     this.arrows.length = 0;
-    this.visual.geometry.dispose();
-    this.visual.material.dispose();
+    for (const visual of this.visuals.values()) {
+      visual.geometry.dispose();
+      visual.material.dispose();
+    }
+    this.visuals.clear();
   }
 
   private place(arrow: Arrow): void {
-    // The authored model is centred on its origin with the head at +z.
-    arrow.mesh.position.copy(arrow.tip).addScaledVector(arrow.direction, -ARROW_HALF_LENGTH);
+    const visual = this.visuals.get(arrow.kind) ?? this.visuals.get('arrow');
+    const offset = visual?.offset ?? 0;
+    if (arrow.activeMesh) {
+      arrow.activeMesh.position.copy(arrow.tip).addScaledVector(arrow.direction, offset);
+    }
   }
 
   private retire(arrow: Arrow): void {
     arrow.active = false;
-    arrow.mesh.visible = false;
+    if (arrow.activeMesh) {
+      arrow.activeMesh.visible = false;
+      arrow.activeMesh = null;
+    }
   }
 
   private farthest(): Arrow | undefined {

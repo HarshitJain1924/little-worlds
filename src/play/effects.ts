@@ -8,7 +8,7 @@ import * as THREE from 'three';
  * allocated per hit and nothing lives longer than a quarter second.
  */
 
-export type ImpactKind = 'hit' | 'heavy' | 'block';
+export type ImpactKind = 'hit' | 'heavy' | 'block' | 'magic' | 'magicHeavy';
 
 interface Burst {
   mesh: THREE.Mesh;
@@ -30,6 +30,8 @@ const COLORS: Record<ImpactKind, number> = {
   hit: 0xffd7a0,
   heavy: 0xffb066,
   block: 0x9ecbff,
+  magic: 0xb59cff,
+  magicHeavy: 0xdf70ff,
 };
 
 const BURST_COUNT = 8;
@@ -100,11 +102,12 @@ export class CombatEffects {
     const burst = this.bursts[this.cursor % this.bursts.length];
     this.cursor += 1;
 
+    const isHeavy = kind === 'heavy' || kind === 'magicHeavy';
     burst.age = 0;
-    burst.life = kind === 'heavy' ? 0.26 : 0.2;
-    burst.startScale = kind === 'heavy' ? 0.9 : 0.6;
-    burst.endScale = kind === 'heavy' ? 2.5 : 1.9;
-    burst.baseOpacity = kind === 'block' ? 0.7 : kind === 'heavy' ? 0.95 : 0.8;
+    burst.life = isHeavy ? 0.26 : 0.2;
+    burst.startScale = isHeavy ? 0.9 : 0.6;
+    burst.endScale = isHeavy ? 2.5 : 1.9;
+    burst.baseOpacity = kind === 'block' ? 0.7 : isHeavy ? 0.95 : 0.8;
     burst.material.color.setHex(COLORS[kind]);
     burst.material.opacity = burst.baseOpacity;
     burst.mesh.position.set(position.x, position.y + 1.15, position.z);

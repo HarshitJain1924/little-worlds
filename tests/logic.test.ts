@@ -391,8 +391,8 @@ test('melee identities differ in timing, reach and defence', () => {
 
   // The alternation must be a different swing, not the same clip twice.
   assert.equal(profileFor('rogue'), rogue);
-  // The Mage stays on the baseline moveset until its own milestone.
-  assert.equal(profileFor('mage'), knight);
+  // The Mage has its own moveset in M7.4.
+  assert.equal(profileFor('mage').id, 'mage');
   // The Ranger has its own bow profile since M7.3.
   assert.equal(profileFor('ranger').id, 'ranger');
 });
@@ -528,7 +528,7 @@ test('the Ranger shoots physical arrows from the bow release', () => {
   // Melee identities are untouched by the ranged milestone.
   assert.equal(profileFor('knight').light.clip, 'Melee_1H_Attack_Slice_Diagonal');
   assert.equal(profileFor('knight').light.ranged, undefined);
-  assert.equal(profileFor('mage'), profileFor('knight'), 'the Mage still uses the baseline');
+  assert.equal(profileFor('mage').id, 'mage', 'the Mage has its own combat profile in M7.4');
 });
 
 test('the arrow asset is present and points along its local +z axis', () => {
