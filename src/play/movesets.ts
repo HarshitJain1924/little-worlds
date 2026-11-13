@@ -96,7 +96,27 @@ export interface WhirlwindAbilityProfile {
   bladeArc?: number;
 }
 
-export type AbilityProfile = CounterAbilityProfile | WhirlwindAbilityProfile;
+export interface ShadowstepAbilityProfile {
+  kind: 'shadowstep';
+  id: string;
+  name: string;
+  description: string;
+  cooldown: number;
+  clip: string;
+  strikeClip: string;
+  duration: number;
+  timeScale: number;
+  armored?: boolean;
+  stepCount: number;
+  stepDuration: number;
+  dashDuration: number;
+  dashDistance: number;
+  pathWidth: number;
+  damage: number;
+  maxVerticalOffset?: number;
+}
+
+export type AbilityProfile = CounterAbilityProfile | WhirlwindAbilityProfile | ShadowstepAbilityProfile;
 
 export interface AimProfile {
   /** Looping stance clip. */
@@ -237,6 +257,38 @@ export const BARBARIAN_ABILITY: WhirlwindAbilityProfile = {
   bladeArc: 1.22,
 };
 
+/**
+ * Authored timings for Rogue's Shadowstep.
+ * A 3-step rapid dash-strike sequence: each step features an evasive dash surge (0.12s)
+ * transitioning into a twin-dagger cross-slice (0.10s) with line collision and path hit detection.
+ * Active sequence spans 3 x 0.22s = 0.66s, followed by 0.16s recovery (total 0.82s).
+ */
+export const ROGUE_SHADOWSTEP_STEP_COUNT = 3;
+export const ROGUE_SHADOWSTEP_STEP_DURATION = 0.22;
+export const ROGUE_SHADOWSTEP_DASH_DURATION = 0.12;
+export const ROGUE_SHADOWSTEP_DASH_DISTANCE = 2.8;
+export const ROGUE_SHADOWSTEP_TOTAL_DURATION = 0.82;
+
+export const ROGUE_ABILITY: ShadowstepAbilityProfile = {
+  kind: 'shadowstep',
+  id: 'shadowstep',
+  name: 'Shadowstep',
+  description: 'Rapidly surge through enemies in a sequence of deadly dash-slices.',
+  cooldown: 7.0,
+  clip: 'Dodge_Forward',
+  strikeClip: 'Melee_Dualwield_Attack_Slice',
+  duration: ROGUE_SHADOWSTEP_TOTAL_DURATION,
+  timeScale: 1.0,
+  armored: true,
+  stepCount: ROGUE_SHADOWSTEP_STEP_COUNT,
+  stepDuration: ROGUE_SHADOWSTEP_STEP_DURATION,
+  dashDuration: ROGUE_SHADOWSTEP_DASH_DURATION,
+  dashDistance: ROGUE_SHADOWSTEP_DASH_DISTANCE,
+  pathWidth: 1.3,
+  damage: 48,
+  maxVerticalOffset: 1.5,
+};
+
 export const PROFILES: Record<CombatProfileId, CombatProfile> = {
   knight: {
     id: 'knight',
@@ -342,6 +394,7 @@ export const PROFILES: Record<CombatProfileId, CombatProfile> = {
       tag: 'heavy',
     },
     guard: null,
+    ability: ROGUE_ABILITY,
   },
 
   /**

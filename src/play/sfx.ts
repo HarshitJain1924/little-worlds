@@ -96,6 +96,18 @@ export class Sfx {
     this.noise(0.2, 0.12, 'lowpass', 1100, 220);
   }
 
+  /** Rapid shadow dash whoosh as the Rogue phases forward. */
+  shadowstepDash(): void {
+    this.noise(0.12, 0.04, 'bandpass', 1200, 600);
+    this.tone(260, 110, 0.12, 0.08, 'triangle');
+  }
+
+  /** Sharp twin-dagger slice cutting through enemies. */
+  shadowstepStrike(): void {
+    this.noise(0.15, 0.06, 'highpass', 2400, 1600);
+    this.tone(320, 140, 0.14, 0.1, 'triangle');
+  }
+
   dodge(): void {
     this.noise(0.16, 0.035, 'bandpass', 500, 1500);
   }

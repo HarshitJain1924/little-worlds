@@ -4,10 +4,17 @@ import type { DodgeMotion } from './models';
 import { DODGE_MOTION, findBone } from './models';
 import type { ThirdPersonCamera } from './camera';
 import type { InputController } from './input';
-import { hasLineOfSight, resolveBlockers } from './collision';
+import { hasLineOfSight, nearestObstruction, resolveBlockers } from './collision';
 import type { World } from './world';
 import { ARENA } from './world';
-import type { AbilityProfile, CounterAbilityProfile, WhirlwindAbilityProfile, ChargeProfile, CombatProfile } from './movesets';
+import type {
+  AbilityProfile,
+  CounterAbilityProfile,
+  WhirlwindAbilityProfile,
+  ShadowstepAbilityProfile,
+  ChargeProfile,
+  CombatProfile,
+} from './movesets';
 import { profileFor } from './movesets';
 import type { CharacterId } from './roster';
 
@@ -140,6 +147,8 @@ export class Player {
    * Returns candidate targets in the encounter for range, line-of-sight and height filtering.
    */
   findAreaTargets: (() => unknown[]) | null = null;
+  /** Fired at each step of a multi-step ability (e.g. Shadowstep). */
+  onAbilityStep: ((stepIndex: number, ability: AbilityProfile) => void) | null = null;
   /**
    * Optional custom radial sweep handler for area-of-effect abilities.
    * If provided, executeWhirlwindSweep delegates to this rather than using findAreaTargets.
@@ -191,6 +200,11 @@ export class Player {
   private abilityHitApplied = false;
   private readonly abilityHitTargets = new Set<object>();
   private abilityBuffer = 0;
+  private shadowstepStepIndex = -1;
+  private shadowstepHitThisStep = false;
+  private readonly shadowstepStartPos = new THREE.Vector3();
+  private readonly shadowstepTargetPos = new THREE.Vector3();
+  private readonly shadowstepDashDir = new THREE.Vector3();
   private dodging = false;
   private dodgeTime = 0;
   private dodgeDuration: number = DODGE.duration;
@@ -305,6 +319,10 @@ export class Player {
 
   get abilityTargetsHit(): ReadonlySet<object> {
     return this.abilityHitTargets;
+  }
+
+  get activeShadowstepStep(): number {
+    return this.shadowstepStepIndex;
   }
 
   /**
@@ -530,7 +548,7 @@ export class Player {
       const abilityMoveScale =
         this.isAbilityActive && this.abilityProfile && 'moveScale' in this.abilityProfile && typeof this.abilityProfile.moveScale === 'number'
           ? this.abilityProfile.moveScale
-          : 0.15;
+          : (this.isAbilityActive && this.abilityProfile?.kind === 'shadowstep' ? 0 : 0.15);
       const speedFactor = this.isAttacking || this.isAbilityActive
         ? abilityMoveScale
         : this.charging
@@ -548,8 +566,10 @@ export class Player {
       this.velocity.z += (this.direction.z * targetSpeed - this.velocity.z) * blend;
     }
 
-    this.position.x += this.velocity.x * delta;
-    this.position.z += this.velocity.z * delta;
+    if (!this.isAbilityActive || this.abilityProfile?.kind !== 'shadowstep') {
+      this.position.x += this.velocity.x * delta;
+      this.position.z += this.velocity.z * delta;
+    }
 
     this.speed = Math.hypot(this.velocity.x, this.velocity.z);
 
@@ -826,12 +846,17 @@ export class Player {
       this.yaw = Math.atan2(aim.x, aim.z);
     }
 
-    this.rig.animator.play(ability.clip, {
-      once: true,
-      fade: 0.08,
-      timeScale: ability.timeScale,
-      clamp: true,
-    });
+    if (ability.kind === 'shadowstep') {
+      this.shadowstepStepIndex = -1;
+      this.initiateShadowstepStep(0, ability);
+    } else {
+      this.rig.animator.play(ability.clip, {
+        once: true,
+        fade: 0.08,
+        timeScale: ability.timeScale,
+        clamp: true,
+      });
+    }
 
     this.onAbilityStart?.(ability);
   }
@@ -844,6 +869,8 @@ export class Player {
     this.counterAttacker = null;
     this.abilityHitApplied = false;
     this.abilityHitTargets.clear();
+    this.shadowstepStepIndex = -1;
+    this.shadowstepHitThisStep = false;
   }
 
   private updateAbility(delta: number): void {
@@ -890,6 +917,213 @@ export class Player {
         this.interruptAbility();
         return;
       }
+    } else if (ability.kind === 'shadowstep') {
+      this.updateShadowstep(ability);
+    }
+  }
+
+  private initiateShadowstepStep(
+    stepIndex: number,
+    ability: ShadowstepAbilityProfile,
+  ): void {
+    this.shadowstepStepIndex = stepIndex;
+    this.shadowstepHitThisStep = false;
+    this.shadowstepStartPos.copy(this.position);
+
+    const dashDir = new THREE.Vector3();
+    if (this.lockTarget) {
+      dashDir.set(
+        this.lockTarget.x - this.position.x,
+        0,
+        this.lockTarget.z - this.position.z,
+      );
+    } else {
+      const baseDir = this.direction.lengthSq() > 0.01 ? this.direction : this.forward;
+      let targetEnemyPos: THREE.Vector3 | null = null;
+      let bestDist = Infinity;
+
+      if (this.findAreaTargets) {
+        const candidates = this.findAreaTargets();
+        if (Array.isArray(candidates)) {
+          for (const candidate of candidates) {
+            if (!candidate || typeof candidate !== 'object') continue;
+            if (this.abilityHitTargets.has(candidate)) continue;
+            const e = candidate as { alive?: boolean; position?: THREE.Vector3 };
+            if (e.alive === false || !e.position) continue;
+            const toEnemy = new THREE.Vector3().copy(e.position).sub(this.position).setY(0);
+            const dist = toEnemy.length();
+            if (dist > 0.2 && dist <= ability.dashDistance + 1.2) {
+              toEnemy.normalize();
+              if (toEnemy.dot(baseDir) >= 0.57 && dist < bestDist) {
+                bestDist = dist;
+                targetEnemyPos = e.position;
+              }
+            }
+          }
+        }
+      }
+
+      if (targetEnemyPos) {
+        dashDir.copy(targetEnemyPos).sub(this.position).setY(0);
+      } else if (this.direction.lengthSq() > 0.01) {
+        dashDir.copy(this.direction).setY(0);
+      } else if (this.forward.lengthSq() > 0.01) {
+        dashDir.copy(this.forward).setY(0);
+      } else {
+        dashDir.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
+      }
+    }
+
+    if (dashDir.lengthSq() > 0.001) dashDir.normalize();
+    else dashDir.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
+
+    this.shadowstepDashDir.copy(dashDir);
+    this.yaw = Math.atan2(dashDir.x, dashDir.z);
+
+    // Obstacle collision check: stop dash at wall
+    const targetX = this.position.x + dashDir.x * ability.dashDistance;
+    const targetZ = this.position.z + dashDir.z * ability.dashDistance;
+    const tObs =
+      this.world.obstacles && this.world.obstacles.length > 0
+        ? nearestObstruction(
+            this.position.x,
+            this.position.y + 0.5,
+            this.position.z,
+            targetX,
+            this.position.y + 0.5,
+            targetZ,
+            this.world.obstacles,
+            BODY_RADIUS,
+          )
+        : 1.0;
+
+    const actualDist = Math.max(0, tObs * ability.dashDistance - 0.05);
+    this.shadowstepTargetPos.set(
+      this.position.x + dashDir.x * actualDist,
+      this.position.y,
+      this.position.z + dashDir.z * actualDist,
+    );
+
+    this.rig.animator.play(ability.clip, {
+      once: true,
+      fade: 0.03,
+      timeScale: 2.0,
+      clamp: true,
+    });
+
+    this.onAbilityStep?.(stepIndex, ability);
+  }
+
+  private updateShadowstep(ability: ShadowstepAbilityProfile): void {
+    const clipTime = this.abilityTime * ability.timeScale;
+    const totalActiveTime = ability.stepCount * ability.stepDuration;
+
+    if (clipTime < 0.10) {
+      this.abilityPhase = 'startup';
+    } else if (clipTime < totalActiveTime) {
+      this.abilityPhase = 'active';
+    } else if (clipTime < ability.duration) {
+      this.abilityPhase = 'recovery';
+    } else {
+      this.interruptAbility();
+      return;
+    }
+
+    if (this.abilityPhase === 'startup' || this.abilityPhase === 'active') {
+      const stepIndex = Math.min(
+        ability.stepCount - 1,
+        Math.floor(clipTime / ability.stepDuration),
+      );
+
+      if (stepIndex > this.shadowstepStepIndex) {
+        this.initiateShadowstepStep(stepIndex, ability);
+      }
+
+      const tInStep = clipTime - this.shadowstepStepIndex * ability.stepDuration;
+
+      if (tInStep < ability.dashDuration) {
+        const u = Math.min(1.0, Math.max(0.0, tInStep / ability.dashDuration));
+        this.position.x = THREE.MathUtils.lerp(this.shadowstepStartPos.x, this.shadowstepTargetPos.x, u);
+        this.position.z = THREE.MathUtils.lerp(this.shadowstepStartPos.z, this.shadowstepTargetPos.z, u);
+        this.clampToArena();
+        resolveBlockers(this.position, this.world.blockers, BODY_RADIUS);
+      } else {
+        this.position.x = this.shadowstepTargetPos.x;
+        this.position.z = this.shadowstepTargetPos.z;
+        this.clampToArena();
+        resolveBlockers(this.position, this.world.blockers, BODY_RADIUS);
+
+        if (!this.shadowstepHitThisStep) {
+          this.shadowstepHitThisStep = true;
+          this.rig.animator.play(ability.strikeClip, {
+            once: true,
+            fade: 0.03,
+            timeScale: 2.2,
+            clamp: true,
+          });
+          this.executeShadowstepStrike(ability);
+        }
+      }
+    }
+  }
+
+  private executeShadowstepStrike(ability: ShadowstepAbilityProfile): void {
+    if (!this.findAreaTargets) return;
+    const candidates = this.findAreaTargets();
+    if (!Array.isArray(candidates)) return;
+
+    const p1x = this.shadowstepStartPos.x;
+    const p1z = this.shadowstepStartPos.z;
+    const p2x = this.shadowstepTargetPos.x;
+    const p2z = this.shadowstepTargetPos.z;
+
+    const dx = p2x - p1x;
+    const dz = p2z - p1z;
+    const lenSq = dx * dx + dz * dz;
+
+    const pathRadiusSq = ability.pathWidth * ability.pathWidth;
+    const maxVertical = ability.maxVerticalOffset ?? 1.5;
+
+    for (const candidate of candidates) {
+      if (!candidate || typeof candidate !== 'object') continue;
+      if (this.abilityHitTargets.has(candidate)) continue;
+
+      const enemyObj = candidate as { alive?: boolean; position?: THREE.Vector3 };
+      if (enemyObj.alive === false || !enemyObj.position) continue;
+
+      const ex = enemyObj.position.x;
+      const ez = enemyObj.position.z;
+
+      let u = 0;
+      if (lenSq > 0.0001) {
+        u = ((ex - p1x) * dx + (ez - p1z) * dz) / lenSq;
+      }
+      const uClamped = Math.max(0, Math.min(1, u));
+      const closeX = p1x + uClamped * dx;
+      const closeZ = p1z + uClamped * dz;
+      const distSq = (ex - closeX) * (ex - closeX) + (ez - closeZ) * (ez - closeZ);
+
+      if (distSq > pathRadiusSq) continue;
+      if (u < -0.15 || u > 1.25) continue;
+
+      const dy = Math.abs(enemyObj.position.y - this.position.y);
+      if (dy > maxVertical) continue;
+
+      const clear =
+        !this.world.obstacles ||
+        hasLineOfSight(
+          closeX,
+          this.position.y + 1.2,
+          closeZ,
+          enemyObj.position.x,
+          enemyObj.position.y + 1.2,
+          enemyObj.position.z,
+          this.world.obstacles,
+        );
+      if (!clear) continue;
+
+      this.abilityHitTargets.add(candidate);
+      this.onAbilityHit?.(candidate, ability);
     }
   }
 

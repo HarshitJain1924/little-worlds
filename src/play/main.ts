@@ -688,6 +688,15 @@ async function boot(): Promise<void> {
   player.onAbilityStart = (ability) => {
     if (ability.kind === 'whirlwind') {
       sfx.whirlwind();
+    } else if (ability.kind === 'shadowstep') {
+      sfx.shadowstepDash();
+    }
+  };
+
+  player.onAbilityStep = (stepIndex, ability) => {
+    if (ability.kind === 'shadowstep') {
+      if (stepIndex > 0) sfx.shadowstepDash();
+      vfx.spawn('dodgeDust', player.position, player.yaw);
     }
   };
 
@@ -709,15 +718,23 @@ async function boot(): Promise<void> {
       }
       if (enemy.takeDamage(ability.damage, player.position)) {
         hud.damageNumber(enemy.position, ability.damage, 'dealt');
-        effects.spawn(enemy.position, 'heavy');
-        vfx.spawn('impactHeavy', enemy.position, player.yaw);
-        if (ability.kind === 'whirlwind') {
-          sfx.whirlwindHit();
+        if (ability.kind === 'shadowstep') {
+          effects.spawn(enemy.position, 'hit');
+          vfx.spawn('slashLight', enemy.position, player.yaw);
+          sfx.shadowstepStrike();
+          hitStopTimer = Math.max(hitStopTimer, 0.05);
+          cameraRig.shake(0.14);
         } else {
-          sfx.shieldRiposte();
+          effects.spawn(enemy.position, 'heavy');
+          vfx.spawn('impactHeavy', enemy.position, player.yaw);
+          if (ability.kind === 'whirlwind') {
+            sfx.whirlwindHit();
+          } else {
+            sfx.shieldRiposte();
+          }
+          hitStopTimer = Math.max(hitStopTimer, 0.09);
+          cameraRig.shake(ability.kind === 'whirlwind' ? 0.24 : 0.22);
         }
-        hitStopTimer = Math.max(hitStopTimer, 0.09);
-        cameraRig.shake(ability.kind === 'whirlwind' ? 0.24 : 0.22);
         if (!enemy.alive) sfx.enemyDeath();
       }
     }
