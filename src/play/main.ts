@@ -3,7 +3,8 @@ import './play.css';
 import { ThirdPersonCamera } from './camera';
 import type { WeaponSpec } from './character';
 import { CharacterRig, SOCKETS, weaponFrom } from './character';
-import { hasLineOfSight } from './collision';
+import { hasLineOfSight, nearestObstruction } from './collision';
+import type { GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { CombatEffects } from './effects';
 import { InputController } from './input';
 import { Sfx } from './sfx';
@@ -16,6 +17,10 @@ import { applyQuality, readQualityPreference, storeQualityPreference, type Quali
 import { TargetTracker } from './targeting';
 import { ARENA, buildWorld } from './world';
 import { Hud } from './hud';
+import { ADVENTURERS, findAdventurer, type CharacterId, type WeaponKey } from './roster';
+import { profileFor } from './movesets';
+import type { ArrowVisual, Impact } from './projectiles';
+import { ProjectilePool } from './projectiles';
 
 const loadingFill = document.querySelector<HTMLElement>('#loading-fill');
 const loadingLabel = document.querySelector<HTMLElement>('#loading-label');
@@ -152,19 +157,49 @@ async function boot(): Promise<void> {
 
   progress(0.04, 'shaping the ground…');
 
-  const [world, clips, knightGltf, minionGltf, warriorGltf, swordGltf, shieldGltf, bladeGltf, axeGltf, largeShieldGltf] =
-    await Promise.all([
-      buildWorld((fraction, label) => progress(0.05 + fraction * 0.62, label)),
-      loadClipSet(),
-      loadModel(ASSETS.knight),
-      loadModel(ASSETS.skeletonMinion),
-      loadModel(ASSETS.skeletonWarrior),
-      loadModel(ASSETS.sword),
-      loadModel(ASSETS.shield),
-      loadModel(ASSETS.skeletonBlade),
-      loadModel(ASSETS.skeletonAxe),
-      loadModel(ASSETS.skeletonShield),
-    ]);
+  const [
+    world,
+    clips,
+    knightGltf,
+    minionGltf,
+    warriorGltf,
+    swordGltf,
+    shieldGltf,
+    bladeGltf,
+    axeGltf,
+    largeShieldGltf,
+    barbarianGltf,
+    rogueGltf,
+    mageGltf,
+    rangerGltf,
+    axeTwoHandedGltf,
+    shieldBarbarianGltf,
+    daggerGltf,
+    staffGltf,
+    bowGltf,
+    arrowGltf,
+  ] = await Promise.all([
+    buildWorld((fraction, label) => progress(0.05 + fraction * 0.62, label)),
+    loadClipSet(),
+    loadModel(ASSETS.knight),
+    loadModel(ASSETS.skeletonMinion),
+    loadModel(ASSETS.skeletonWarrior),
+    loadModel(ASSETS.sword),
+    loadModel(ASSETS.shield),
+    loadModel(ASSETS.skeletonBlade),
+    loadModel(ASSETS.skeletonAxe),
+    loadModel(ASSETS.skeletonShield),
+    loadModel(ASSETS.barbarian),
+    loadModel(ASSETS.rogue),
+    loadModel(ASSETS.mage),
+    loadModel(ASSETS.ranger),
+    loadModel(ASSETS.axeTwoHanded),
+    loadModel(ASSETS.shieldBarbarian),
+    loadModel(ASSETS.dagger),
+    loadModel(ASSETS.staff),
+    loadModel(ASSETS.bow),
+    loadModel(ASSETS.arrow),
+  ]);
 
   scene.add(world.group);
 
@@ -172,16 +207,169 @@ async function boot(): Promise<void> {
   const qualityTargets = { renderer, sun, scene, foliage: world.foliage };
   applyQuality(quality, qualityTargets);
 
-  progress(0.72, 'arming the knight…');
+  progress(0.72, 'arming the adventurers…');
 
-  const knightWeapons: WeaponSpec[] = [
-    { model: weaponFrom(swordGltf), socket: SOCKETS.sword },
-    { model: weaponFrom(shieldGltf), socket: SOCKETS.shield },
-  ];
-  const playerRig = new CharacterRig(knightGltf.scene, clips, knightWeapons);
-  scene.add(playerRig.root);
+  // One template per character and per weapon. Every rig is a skinned clone of
+  // these, so switching never re-downloads or re-parses a model.
+  const characterTemplates: Record<CharacterId, THREE.Object3D> = {
+    knight: knightGltf.scene,
+    barbarian: barbarianGltf.scene,
+    rogue: rogueGltf.scene,
+    mage: mageGltf.scene,
+    ranger: rangerGltf.scene,
+  };
 
-  const player = new Player(playerRig, world);
+  const weaponTemplates: Record<WeaponKey, THREE.Object3D> = {
+    sword: weaponFrom(swordGltf),
+    shield: weaponFrom(shieldGltf),
+    axe: weaponFrom(axeTwoHandedGltf),
+    barbarianShield: weaponFrom(shieldBarbarianGltf),
+    dagger: weaponFrom(daggerGltf),
+    staff: weaponFrom(staffGltf),
+    bow: weaponFrom(bowGltf),
+  };
+
+  function buildRig(id: CharacterId): CharacterRig {
+    const adventurer = findAdventurer(id);
+    if (!adventurer) throw new Error(`Unknown adventurer "${id}"`);
+
+    const weapons: WeaponSpec[] = adventurer.weapons.map((entry) => ({
+      model: weaponTemplates[entry.asset],
+      socket: SOCKETS[entry.socket],
+    }));
+
+    return new CharacterRig(characterTemplates[id], clips, weapons);
+  }
+
+  const player = new Player(buildRig('knight'), world, undefined, profileFor('knight'));
+  scene.add(player.rig.root);
+  let activeCharacter: CharacterId = 'knight';
+
+  // ---- projectiles -------------------------------------------------------
+  /** Uses the authored arrow's own mesh: one shared geometry and material. */
+  function arrowVisual(gltf: GLTF): ArrowVisual {
+    const meshes: THREE.Mesh[] = [];
+    gltf.scene.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (mesh.isMesh) meshes.push(mesh);
+    });
+
+    const first = meshes[0];
+    if (!first) throw new Error('arrow model has no mesh');
+    const material = Array.isArray(first.material) ? first.material[0] : first.material;
+    return { geometry: first.geometry, material };
+  }
+
+  const projectiles = new ProjectilePool(scene, world, arrowVisual(arrowGltf));
+
+  /** Height of the aim ray's origin: the player's shoulder, not the camera boom. */
+  const AIM_HEIGHT = 1.45;
+  const aimRay = new THREE.Vector3();
+  const aimCamera = new THREE.Vector3();
+  const aimPoint = new THREE.Vector3();
+  const shotOrigin = new THREE.Vector3();
+  const shotDirection = new THREE.Vector3();
+  const muzzle = new THREE.Vector3();
+
+  /**
+   * Where the camera forward ray first meets the world: an obstacle, the ground,
+   * or nothing within range. Firing at this point (rather than parallel to the
+   * view) is what makes pitch matter.
+   */
+  function cameraAimPoint(out: THREE.Vector3, maxRange: number): THREE.Vector3 {
+    cameraRig.camera.getWorldDirection(aimCamera);
+    aimRay.set(player.position.x, player.position.y + AIM_HEIGHT, player.position.z);
+
+    const endX = aimRay.x + aimCamera.x * maxRange;
+    const endY = aimRay.y + aimCamera.y * maxRange;
+    const endZ = aimRay.z + aimCamera.z * maxRange;
+    const obstruction = nearestObstruction(
+      aimRay.x,
+      aimRay.y,
+      aimRay.z,
+      endX,
+      endY,
+      endZ,
+      world.obstacles,
+      0.1,
+    );
+
+    // Terrain has no proxy, so march the (already shortened) ray in coarse steps.
+    let reach = Math.max(1.5, obstruction * maxRange);
+    for (let distance = 0.75; distance <= reach; distance += 0.75) {
+      const x = aimRay.x + aimCamera.x * distance;
+      const y = aimRay.y + aimCamera.y * distance;
+      const z = aimRay.z + aimCamera.z * distance;
+      if (y <= world.heightAt(x, z)) {
+        reach = distance;
+        break;
+      }
+    }
+
+    return out.set(
+      aimRay.x + aimCamera.x * reach,
+      aimRay.y + aimCamera.y * reach,
+      aimRay.z + aimCamera.z * reach,
+    );
+  }
+
+  player.onRangedShot = (attack) => {
+    const ranged = attack.ranged;
+    if (!ranged) return;
+
+    player.weaponHand(muzzle);
+    muzzle.y += 0.06;
+
+    // A hard lock wins over the camera: the arrow goes to the selected body.
+    const locked = tracker.locked;
+    if (locked && locked.alive) aimPoint.set(locked.position.x, locked.position.y + 1.05, locked.position.z);
+    else cameraAimPoint(aimPoint, ranged.maxRange);
+
+    shotDirection.copy(aimPoint).sub(muzzle);
+    if (shotDirection.lengthSq() < 1e-6) return;
+    shotDirection.normalize();
+    shotOrigin.copy(muzzle).addScaledVector(shotDirection, 0.4);
+
+    projectiles.spawn({
+      origin: shotOrigin,
+      direction: shotDirection,
+      speed: ranged.speed,
+      damage: attack.damage,
+      maxRange: ranged.maxRange,
+    });
+
+    const heavy = attack === player.profile.heavy;
+    sfx.bowRelease(heavy);
+    cameraRig.shake(heavy ? 0.06 : 0.035);
+  };
+
+  /**
+   * Swaps the visible Adventurer without touching the encounter: the single
+   * Player controller, camera, target lock and enemies keep their state.
+   */
+  function switchCharacter(id: CharacterId): boolean {
+    if (id === activeCharacter) return false;
+    if (!player.canSwitchCharacter) return false;
+
+    const next = buildRig(id);
+    const previous = player.rig;
+
+    scene.add(next.root);
+    player.replaceRig(next, profileFor(id));
+    scene.remove(previous.root);
+    // Geometry, textures and animation clips are shared with the templates, so
+    // only this rig's mixer and its cloned materials are released.
+    previous.dispose();
+
+    activeCharacter = id;
+    hud.setActiveCharacter(id);
+    return true;
+  }
+
+  hud.setRoster(ADVENTURERS, (id) => {
+    switchCharacter(id as CharacterId);
+  });
+  hud.setActiveCharacter(activeCharacter);
 
   // Flipbook VFX. Quality decides which pools exist at all; low never loads a
   // sheet, so the lightweight rings in CombatEffects carry that tier alone.
@@ -269,7 +457,7 @@ async function boot(): Promise<void> {
   let slashPending: { remaining: number; kind: 'slashLight' | 'slashHeavy'; clip: string } | null = null;
 
   player.onAttackStart = (attack) => {
-    const heavy = attack.damage >= 40;
+    const heavy = attack === player.profile.heavy;
     sfx.swing(heavy);
     slashPending = {
       remaining: Math.max(0, attack.hitStart / attack.timeScale - SLASH_LEAD),
@@ -277,6 +465,29 @@ async function boot(): Promise<void> {
       clip: attack.clip,
     };
   };
+
+  /** Arrow feedback. Damage has already been applied when this runs. */
+  function onArrowImpact(impact: Impact): void {
+    if (impact.kind === 'expired') return;
+
+    if (impact.kind === 'target' && impact.target) {
+      const enemy = impact.target as Enemy;
+      hud.damageNumber(enemy.position, impact.damage, 'dealt');
+      effects.spawn(enemy.position, 'hit');
+      vfx.spawn('impact', impact.position, player.yaw);
+      sfx.arrowHit();
+      hitStopTimer = Math.max(hitStopTimer, 0.03);
+      cameraRig.shake(0.05);
+      if (!enemy.alive) sfx.enemyDeath();
+      return;
+    }
+
+    // Wall, pillar, trunk or ground: the arrow stops there. Only the flipbook
+    // spark is used, because the ring pool sits at chest height and would float
+    // above a ground strike.
+    vfx.spawn('impact', impact.position, player.yaw);
+    sfx.arrowHit();
+  }
 
   player.onDodgeStart = () => {
     sfx.dodge();
@@ -319,7 +530,7 @@ async function boot(): Promise<void> {
       hitTargets.add(enemy);
       hud.damageNumber(enemy.position, attack.damage, 'dealt');
 
-      const heavy = attack.damage >= 40;
+      const heavy = attack === player.profile.heavy;
       effects.spawn(enemy.position, heavy ? 'heavy' : 'hit');
       // Only a confirmed hit sparks; a whiffed swing shows the trail alone.
       vfx.spawn(heavy ? 'impactHeavy' : 'impact', enemy.position, player.yaw);
@@ -338,7 +549,7 @@ async function boot(): Promise<void> {
     if (preferred) tryHit(preferred);
     if (hits === 0) for (const enemy of enemies) tryHit(enemy);
 
-    if (hits > 0) cameraRig.shake(attack.damage >= 40 ? 0.15 : 0.09);
+    if (hits > 0) cameraRig.shake(attack === player.profile.heavy ? 0.15 : 0.09);
   };
 
   for (const enemy of enemies) {
@@ -380,6 +591,7 @@ async function boot(): Promise<void> {
     player.reset();
     enemies.forEach((enemy) => enemy.reset());
     vfx.clear();
+    projectiles.clear();
     slashPending = null;
     tracker.release();
     defeated = false;
@@ -392,6 +604,11 @@ async function boot(): Promise<void> {
     const key = event.key.toLowerCase();
     if (key === 'r') restart();
     if (key === 'm') sfx.toggleMute();
+
+    const slot = Number(key);
+    if (Number.isInteger(slot) && slot >= 1 && slot <= ADVENTURERS.length) {
+      switchCharacter(ADVENTURERS[slot - 1].id);
+    }
   });
 
   function updateScoring(): void {
@@ -427,6 +644,8 @@ async function boot(): Promise<void> {
         slashPending = null;
       }
     }
+
+    projectiles.update(delta, enemies, onArrowImpact);
 
     for (const enemy of enemies) enemy.update(delta, player.position, player.alive);
 
@@ -584,9 +803,11 @@ async function boot(): Promise<void> {
     },
     lock: () => tracker.toggleLock(scoring),
     cycle: () => tracker.cycle(scoring),
+    switchCharacter: (id: string) => switchCharacter(id as CharacterId),
+    character: () => activeCharacter,
     teleport: (x: number, z: number) => {
       player.position.set(x, world.heightAt(x, z), z);
-      playerRig.root.position.copy(player.position);
+      player.rig.root.position.copy(player.position);
       cameraRig.update(0, player.position);
     },
     snapCamera: (yaw: number, pitch: number) => {
@@ -600,11 +821,15 @@ async function boot(): Promise<void> {
         z: +player.position.z.toFixed(2),
         hp: Math.round(player.health),
         alive: player.alive,
-        clip: playerRig.animator.playing,
+        clip: player.rig.animator.playing,
+        character: activeCharacter,
+        profile: player.profile.id,
         attacking: player.isAttacking,
         blocking: player.isBlocking,
+        aiming: player.isAiming,
         dodging: player.isDodging,
         dodgeClip: player.dodgingWith,
+        arrows: projectiles.activeCount,
       },
       enemies: enemies.map((enemy) => ({
         hp: Math.round(enemy.health),
@@ -638,7 +863,7 @@ async function boot(): Promise<void> {
       if (!enemy) return;
       player.position.set(enemy.position.x, enemy.position.y, enemy.position.z + 1.8);
       player.yaw = Math.PI;
-      playerRig.root.position.copy(player.position);
+      player.rig.root.position.copy(player.position);
       cameraRig.update(0, player.position);
     },
     spawnDistance: ARENA.spawn,
@@ -682,11 +907,14 @@ async function boot(): Promise<void> {
         z: +player.position.z.toFixed(2),
         hp: Math.round(player.health),
         alive: player.alive,
-        clip: playerRig.animator.playing,
+        clip: player.rig.animator.playing,
+        character: activeCharacter,
         attacking: player.isAttacking,
         blocking: player.isBlocking,
+        aiming: player.isAiming,
         dodging: player.isDodging,
         dodgeClip: player.dodgingWith,
+        arrows: projectiles.activeCount,
         camera: {
           yaw: +cameraRig.yaw.toFixed(3),
           pitch: +cameraRig.pitch.toFixed(3),

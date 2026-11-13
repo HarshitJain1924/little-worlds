@@ -70,6 +70,79 @@ html, body {
   padding: 10px 12px 12px;
 }
 
+/* Adventurer tray. Sits above the vitals panel on both layouts, so it never
+   overlaps the touch combat cluster on the right. */
+#party {
+  position: absolute;
+  left: calc(16px + env(safe-area-inset-left));
+  bottom: calc(88px + env(safe-area-inset-bottom));
+  display: flex;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.party-chip {
+  position: relative;
+  width: 38px;
+  height: 44px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(158, 196, 255, 0.2);
+  border-radius: 9px;
+  background: linear-gradient(180deg, rgba(22, 33, 54, 0.74), rgba(9, 15, 28, 0.74));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  color: #dfe8fb;
+  font: inherit;
+  cursor: pointer;
+  pointer-events: auto;
+  backdrop-filter: blur(8px);
+  opacity: 0.62;
+  transition: opacity 140ms ease, transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+  -webkit-user-select: none;
+  user-select: none;
+  touch-action: manipulation;
+}
+
+.party-chip .party-mark {
+  font: 600 13px/1 ui-serif, Georgia, "Times New Roman", serif;
+  letter-spacing: 0.03em;
+  color: var(--accent, #dfe8fb);
+}
+
+.party-chip .party-key {
+  position: absolute;
+  top: 3px;
+  right: 4px;
+  font: 600 8px/1 ui-monospace, SFMono-Regular, monospace;
+  color: rgba(214, 232, 255, 0.42);
+}
+
+.party-chip.is-active {
+  opacity: 1;
+  transform: translateY(-3px);
+  border-color: var(--accent, #9fc4ff);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.07),
+    0 8px 18px rgba(0, 0, 0, 0.45),
+    inset 0 0 16px rgba(255, 255, 255, 0.05);
+}
+
+/* Lit edge under the selected chip: reads at a glance without a label. */
+.party-chip.is-active::after {
+  content: "";
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  bottom: -4px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent, #9fc4ff);
+  box-shadow: 0 0 8px var(--accent, #9fc4ff);
+}
+
+.party-chip:active { transform: translateY(-1px) scale(0.97); }
+
 #vitals .name {
   margin: 0 0 7px;
   font: 600 10px/1 ui-sans-serif, system-ui, sans-serif;
@@ -380,6 +453,8 @@ html, body {
   #dodge { display: block; }
   #hint, #capture { display: none !important; }
   #vitals { width: 46vw; bottom: calc(120px + env(safe-area-inset-bottom)); }
+  #party { bottom: calc(188px + env(safe-area-inset-bottom)); gap: 5px; }
+  .party-chip { width: 34px; height: 40px; }
   #stats { font-size: 10px; }
 }
 

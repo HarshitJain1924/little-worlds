@@ -38,6 +38,18 @@ export class Sfx {
     this.noise(0.07, heavy ? 0.12 : 0.08, 'lowpass', 1400, 300);
   }
 
+  /** Bowstring loosed: a short snap of air, no file. */
+  bowRelease(heavy: boolean): void {
+    this.noise(0.08, heavy ? 0.07 : 0.05, 'highpass', heavy ? 1700 : 2300, 800);
+    this.tone(heavy ? 150 : 195, 95, 0.09, heavy ? 0.07 : 0.05, 'triangle');
+  }
+
+  /** Arrow meeting wood, stone or bone. */
+  arrowHit(): void {
+    this.tone(300, 105, 0.09, 0.09);
+    this.noise(0.05, 0.06, 'bandpass', 1400, 420);
+  }
+
   /** Shield ringing off a blow. */
   block(): void {
     this.tone(520, 470, 0.12, 0.06, 'triangle');

@@ -7,11 +7,15 @@ import type { InputController } from './input';
 import { resolveBlockers } from './collision';
 import type { World } from './world';
 import { ARENA } from './world';
+import type { CombatProfile } from './movesets';
+import { profileFor } from './movesets';
 
 /**
  * Attack definitions. `hitStart`..`hitEnd` are the authored clip times (measured
  * from the keyframes in Rig_Medium_CombatMelee.glb) during which the weapon is
  * sweeping through the target zone, so damage never lands during windup.
+ *
+ * The values for each Adventurer live in `movesets.ts`; this is only the shape.
  */
 export interface AttackProfile {
   clip: string;
@@ -27,41 +31,23 @@ export interface AttackProfile {
   cooldown: number;
   /** Heavy swings trade hits instead of being cancelled by incoming damage. */
   armored?: boolean;
+  /**
+   * Seconds after `hitEnd` before the swing releases the character. Omitted on
+   * profiles that should play their authored tail (the Knight), so a shorter
+   * value here is a deliberate cut, not a side effect.
+   */
+  recovery?: number;
+  /**
+   * Present on bow profiles: this attack launches a projectile instead of
+   * sweeping a melee cone, and fires once at `hitStart`.
+   */
+  ranged?: {
+    /** Metres per second. */
+    speed: number;
+    /** Maximum flight distance. */
+    maxRange: number;
+  };
 }
-
-export const ATTACKS = {
-  // Slice_Diagonal: 1.00s clip, blade crosses front center 0.39..0.46s (peak tip speed at 0.43s).
-  light: {
-    clip: 'Melee_1H_Attack_Slice_Diagonal',
-    damage: 26,
-    range: 2.4,
-    arc: Math.PI * 0.34,
-    hitStart: 0.39,
-    hitEnd: 0.46,
-    timeScale: 1.15,
-    cooldown: 1.2,
-  } as AttackProfile,
-  // Chop: 1.07s clip, overhead windup through 0.53s; downward cleave hits 0.58..0.65s (peak at 0.60s).
-  heavy: {
-    clip: 'Melee_1H_Attack_Chop',
-    damage: 44,
-    range: 2.7,
-    arc: Math.PI * 0.42,
-    hitStart: 0.58,
-    hitEnd: 0.65,
-    timeScale: 1,
-    cooldown: 1.9,
-    armored: true,
-  } as AttackProfile,
-} as const;
-
-const BLOCK = {
-  clip: 'Melee_Blocking',
-  hitClip: 'Melee_Block_Hit',
-  moveScale: 0.4,
-  /** Damage that still gets through a raised shield. */
-  damageScale: 0.25,
-} as const;
 
 const DODGE = {
   /** Playback speed of the authored step. */
@@ -104,7 +90,10 @@ function sampleMotion(values: number[], times: number[], time: number): number {
 }
 
 export class Player {
-  readonly rig: CharacterRig;
+  /** Replaced by `replaceRig` when the player switches Adventurer. */
+  rig: CharacterRig;
+  /** Moveset of the active Adventurer; swapped together with the rig. */
+  profile: CombatProfile;
   readonly position = new THREE.Vector3();
   readonly maxHealth = 100;
 
@@ -124,6 +113,12 @@ export class Player {
     | ((position: THREE.Vector3, forward: THREE.Vector3, attack: AttackProfile, hitTargets: Set<object>) => void)
     | null = null;
 
+  /**
+   * Fired once, at the measured release frame of a ranged attack. Aiming lives
+   * outside the controller, so whoever owns the camera decides where it goes.
+   */
+  onRangedShot: ((attack: AttackProfile) => void) | null = null;
+
   /** Exposed so the camera can recenter behind the direction of travel. */
   readonly velocity = new THREE.Vector3();
   private readonly forward = new THREE.Vector3();
@@ -140,6 +135,9 @@ export class Player {
   private cooldown = 0;
   private lockTimer = 0;
   private blocking = false;
+  private aiming = false;
+  /** A ranged attack only ever fires one arrow. */
+  private shotFired = false;
   private dodging = false;
   private dodgeTime = 0;
   private dodgeDuration: number = DODGE.duration;
@@ -147,6 +145,8 @@ export class Player {
   private dodgeBuffer = 0;
   private attackBuffer = 0;
   private queuedAttack: AttackProfile | null = null;
+  /** Alternates the Rogue's stab and slice; unused by single-clip profiles. */
+  private lightFlip = false;
   private dodgeClip: string | null = null;
   private dodgeMotion: DodgeMotion | null = null;
   private invulnerable = 0;
@@ -157,8 +157,10 @@ export class Player {
     rig: CharacterRig,
     private readonly world: World,
     spawn: { x: number; z: number } = ARENA.spawn,
+    profile: CombatProfile = profileFor('knight'),
   ) {
     this.rig = rig;
+    this.profile = profile;
     this.position.set(spawn.x, world.heightAt(spawn.x, spawn.z), spawn.z);
     this.rig.root.position.copy(this.position);
     this.rig.root.rotation.y = this.yaw;
@@ -170,6 +172,11 @@ export class Player {
 
   get isBlocking(): boolean {
     return this.blocking;
+  }
+
+  /** True while the aim stance is held (Ranger: the defence input draws the bow). */
+  get isAiming(): boolean {
+    return this.aiming;
   }
 
   get isDodging(): boolean {
@@ -201,6 +208,42 @@ export class Player {
   /** Facing direction on the ground plane. */
   facing(out = new THREE.Vector3()): THREE.Vector3 {
     return out.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
+  }
+
+  /**
+   * True when swapping the visual rig cannot corrupt animation or combat state:
+   * alive, standing, and not mid-swing, mid-dodge or mid-recoil.
+   */
+  get canSwitchCharacter(): boolean {
+    return this.alive && this.grounded && !this.isAttacking && !this.dodging && this.lockTimer <= 0.05;
+  }
+
+  /**
+   * Swap the visual rig without touching simulation state. Position, health,
+   * yaw, velocity, cooldowns, i-frames and the guard all live on the
+   * controller, so the encounter continues through the change.
+   */
+  replaceRig(rig: CharacterRig, profile: CombatProfile): void {
+    this.rig = rig;
+    this.profile = profile;
+    // The new skeleton has its own handslot bone; drop the cached one.
+    this.handSlot = undefined;
+    // Nothing from the previous moveset may survive the swap: a stale attack,
+    // buffered press, alternation or guard would apply Knight timings to a
+    // Barbarian swing (or leave a Rogue guarding with no guard).
+    this.attack = null;
+    this.attackTime = 0;
+    this.shotFired = false;
+    this.hitTargets.clear();
+    this.queuedAttack = null;
+    this.attackBuffer = 0;
+    this.lightFlip = false;
+    this.blocking = false;
+    this.aiming = false;
+    rig.root.position.copy(this.position);
+    rig.root.rotation.y = this.yaw;
+    // Pose the new model in the state the simulation is already in.
+    this.updateLocomotion();
   }
 
   /**
@@ -247,10 +290,10 @@ export class Player {
     // Attacks buffer briefly too, so a press during recovery or cooldown is not
     // dropped — it becomes the next swing instead of being swallowed.
     if (input.takeHeavy()) {
-      this.queuedAttack = ATTACKS.heavy;
+      this.queuedAttack = this.profile.heavy;
       this.attackBuffer = 0.22;
     } else if (input.takeAttack()) {
-      this.queuedAttack = ATTACKS.light;
+      this.queuedAttack = this.lightFlip && this.profile.lightAlt ? this.profile.lightAlt : this.profile.light;
       this.attackBuffer = 0.22;
     }
     this.attackBuffer = Math.max(0, this.attackBuffer - delta);
@@ -273,18 +316,35 @@ export class Player {
       const profile = this.queuedAttack;
       this.queuedAttack = null;
       this.attackBuffer = 0;
+      // Only a committed light swing advances the alternation.
+      if (profile === this.profile.light || profile === this.profile.lightAlt) {
+        this.lightFlip = !this.lightFlip;
+      }
       this.startAttack(profile, forward);
     }
 
     if (this.dodging) {
       this.applyDodgeMotion(delta);
     } else {
+      // The defence input either guards or, for a bow profile, draws into the
+      // aim stance. Entering and leaving is fade-driven, never a hard cut.
+      const aim = this.profile.aim;
+      this.aiming =
+        aim !== undefined && input.isBlocking() && this.grounded && this.alive && !this.dodging;
+
       // Keep an active guard intact through block-hit recoil if the button stays held.
-      const canBlock = input.isBlocking() && this.grounded && !this.isAttacking;
+      // A profile without a guard (the Rogue, the Ranger) never enters the state.
+      const canBlock = input.isBlocking() && this.grounded && !this.isAttacking && this.profile.guard !== null;
       this.blocking = canBlock && (this.blocking || this.lockTimer <= 0);
 
-      // Swinging and guarding both slow the character down rather than freezing them.
-      const speedFactor = this.isAttacking ? 0.2 : this.blocking ? BLOCK.moveScale : 1;
+      // Swinging, guarding and aiming all slow the character down rather than freezing them.
+      const speedFactor = this.isAttacking
+        ? 0.2
+        : this.aiming
+          ? (this.profile.aim?.moveScale ?? 1)
+          : this.blocking
+            ? (this.profile.guard?.moveScale ?? 1)
+            : 1;
       const targetSpeed = (move.run ? RUN_SPEED : WALK_SPEED) * inputLength * speedFactor;
 
       const accel = this.grounded ? 13 : 4.5;
@@ -298,7 +358,9 @@ export class Player {
 
     this.speed = Math.hypot(this.velocity.x, this.velocity.z);
 
-    if (!this.isAttacking && !this.dodging && this.direction.lengthSq() > 0.01) {
+    // While the bow is up the aim owns the facing, so travel must not drag the
+    // body around and make the stance oscillate.
+    if (!this.isAttacking && !this.dodging && !this.aiming && this.direction.lengthSq() > 0.01) {
       const targetYaw = Math.atan2(this.direction.x, this.direction.z);
       this.turnToward(targetYaw, delta, 13);
     }
@@ -311,6 +373,9 @@ export class Player {
         this.lockTarget.z - this.position.z,
       );
       this.turnToward(targetYaw, delta, 14);
+    } else if (this.aiming) {
+      // Bow up: face the camera's aim, arriving at it rather than snapping.
+      this.turnToward(Math.atan2(forward.x, forward.z), delta, 11);
     }
 
     this.applyGroundAndGravity(delta);
@@ -333,8 +398,9 @@ export class Player {
     // Dodge i-frames: the roll is a real evasion, not just a cosmetic clip.
     if (this.invulnerable > 0) return 0;
 
-    const blocked = this.blocking;
-    const applied = blocked ? amount * BLOCK.damageScale : amount;
+    const guard = this.profile.guard;
+    const blocked = this.blocking && guard !== null;
+    const applied = blocked && guard ? amount * guard.damageScale : amount;
 
     this.health = Math.max(0, this.health - applied);
     this.rig.flash(0.16);
@@ -344,12 +410,14 @@ export class Player {
       this.attack = null;
       this.blocking = false;
       this.dodging = false;
+      this.aiming = false;
+      this.shotFired = false;
       this.rig.animator.play('Death_A', { once: true, fade: 0.1, clamp: true });
       return applied;
     }
 
-    if (blocked) {
-      this.rig.animator.play(BLOCK.hitClip, { once: true, fade: 0.06, clamp: true });
+    if (blocked && guard) {
+      this.rig.animator.play(guard.hitClip, { once: true, fade: 0.06, clamp: true });
       this.lockTimer = 0.28;
     } else if (this.attack?.armored) {
       // Hyper-armour: the heavy swing continues through the hit, so it is not
@@ -376,16 +444,19 @@ export class Player {
     this.alive = true;
     this.attack = null;
     this.attackTime = 0;
+    this.shotFired = false;
     this.hitTargets.clear();
     this.cooldown = 0;
     this.lockTimer = 0;
     this.blocking = false;
+    this.aiming = false;
     this.dodging = false;
     this.dodgeTime = 0;
     this.dodgeCooldown = 0;
     this.dodgeBuffer = 0;
     this.attackBuffer = 0;
     this.queuedAttack = null;
+    this.lightFlip = false;
     this.dodgeClip = null;
     this.dodgeMotion = null;
     this.invulnerable = 0;
@@ -424,6 +495,7 @@ export class Player {
   private startAttack(profile: AttackProfile, cameraForward: THREE.Vector3): void {
     this.attack = profile;
     this.attackTime = 0;
+    this.shotFired = false;
     this.hitTargets.clear();
     this.cooldown = profile.cooldown;
 
@@ -433,6 +505,10 @@ export class Player {
         this.lockTarget.x - this.position.x,
         this.lockTarget.z - this.position.z,
       );
+    } else if (profile.ranged) {
+      // A bow shot must not spin the body. The aim stance already turns toward
+      // the camera at a limited rate; firing leaves the facing exactly where it
+      // is, and the arrow follows the aim regardless of the body's angle.
     } else {
       const aim = this.direction.lengthSq() > 0.01 ? this.direction : cameraForward;
       this.yaw = Math.atan2(aim.x, aim.z);
@@ -536,9 +612,21 @@ export class Player {
     const authored = this.rig.animator.clipDuration(this.attack.clip);
     const start = this.attack.hitStart / this.attack.timeScale;
     const end = this.attack.hitEnd / this.attack.timeScale;
-    const duration = Math.max(0.2, (authored || 0.8) / this.attack.timeScale);
+    // Profiles that declare a recovery release the character a fixed time after
+    // the strike instead of playing the clip's authored tail. The Knight omits
+    // it, so its timing is byte-for-byte what it was.
+    const duration =
+      this.attack.recovery === undefined
+        ? Math.max(0.2, (authored || 0.8) / this.attack.timeScale)
+        : Math.max(0.2, end + this.attack.recovery);
 
-    if (this.attackTime >= start && prevTime <= end) {
+    if (this.attack.ranged) {
+      // One arrow per attack, released on the first frame past the loose.
+      if (!this.shotFired && this.attackTime >= start) {
+        this.shotFired = true;
+        this.onRangedShot?.(this.attack);
+      }
+    } else if (this.attackTime >= start && prevTime <= end) {
       this.onAttackHit?.(this.position, this.facing(new THREE.Vector3()), this.attack, this.hitTargets);
     }
 
@@ -578,8 +666,13 @@ export class Player {
     if (!this.grounded) return;
     if (this.lockTimer > 0.05) return;
 
-    if (this.blocking) {
-      this.rig.animator.play(BLOCK.clip, { fade: 0.14 });
+    if (this.aiming && this.profile.aim) {
+      this.rig.animator.play(this.profile.aim.clip, { fade: 0.2 });
+      return;
+    }
+
+    if (this.blocking && this.profile.guard) {
+      this.rig.animator.play(this.profile.guard.clip, { fade: 0.14 });
       return;
     }
 

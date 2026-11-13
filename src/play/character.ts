@@ -20,6 +20,9 @@ export const SOCKETS = {
   blade: { bone: 'handslot.r', rotation: [0, 0, 0], scale: 1 } as Socket,
   axe: { bone: 'handslot.r', rotation: [0, 0, 0], scale: 1 } as Socket,
   largeShield: { bone: 'handslot.l', rotation: [0, 0, 0], scale: 1 } as Socket,
+  /** Generic grips, so a new Adventurer does not need its own socket entry. */
+  mainHand: { bone: 'handslot.r', rotation: [0, 0, 0], scale: 1 } as Socket,
+  offHand: { bone: 'handslot.l', rotation: [0, 0, 0], scale: 1 } as Socket,
 } as const;
 
 export function attachWeapon(character: THREE.Object3D, weapon: THREE.Object3D, socket: Socket): boolean {

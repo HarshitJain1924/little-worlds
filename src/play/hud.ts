@@ -29,6 +29,10 @@ export class Hud {
   private readonly targetLabel = document.querySelector<HTMLElement>('#target .label');
   private readonly captureEl = document.querySelector<HTMLElement>('#capture');
   private readonly numbersLayer = document.querySelector<HTMLElement>('#damage-numbers');
+  private readonly partyEl = document.querySelector<HTMLElement>('#party');
+  private readonly characterNameEl = document.querySelector<HTMLElement>('#vitals .name');
+  private readonly partyChips = new Map<string, HTMLButtonElement>();
+  private partyNames = new Map<string, string>();
 
   private readonly bars = new Map<Enemy, Bar>();
   private readonly numbers: DamageNumber[] = [];
@@ -78,6 +82,60 @@ export class Hud {
 
   setCaptureHint(visible: boolean): void {
     if (this.captureEl) this.captureEl.hidden = !visible;
+  }
+
+  /**
+   * Builds the Adventurer tray. Chips are the touch control and the mouse
+   * affordance; the number keys go through the same callback.
+   */
+  setRoster(
+    list: readonly { id: string; name: string; title: string; mark: string; key: string; accent: string }[],
+    onSelect: (id: string) => void,
+  ): void {
+    if (!this.partyEl) return;
+
+    this.partyEl.replaceChildren();
+    this.partyChips.clear();
+    this.partyNames = new Map(list.map((entry) => [entry.id, entry.name]));
+
+    for (const entry of list) {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'party-chip';
+      chip.dataset.id = entry.id;
+      chip.style.setProperty('--accent', entry.accent);
+      chip.title = `${entry.name} — ${entry.title} (${entry.key})`;
+      chip.setAttribute('aria-label', `${entry.name}, ${entry.title}`);
+
+      const mark = document.createElement('span');
+      mark.className = 'party-mark';
+      mark.textContent = entry.mark;
+
+      const cap = document.createElement('span');
+      cap.className = 'party-key';
+      cap.textContent = entry.key;
+
+      chip.append(mark, cap);
+      // preventDefault keeps focus off the chip, so Space stays a jump.
+      chip.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        onSelect(entry.id);
+      });
+
+      this.partyEl.append(chip);
+      this.partyChips.set(entry.id, chip);
+    }
+  }
+
+  setActiveCharacter(id: string): void {
+    for (const [key, chip] of this.partyChips) {
+      const active = key === id;
+      chip.classList.toggle('is-active', active);
+      chip.setAttribute('aria-pressed', String(active));
+    }
+
+    const name = this.partyNames.get(id);
+    if (name && this.characterNameEl) this.characterNameEl.textContent = name;
   }
 
   showBanner(text: string | null): void {

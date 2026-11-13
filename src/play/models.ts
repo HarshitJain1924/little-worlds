@@ -5,14 +5,25 @@ import type { GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
 /** Curated runtime set copied from the KayKit packs into public/rpg/. */
 export const ASSETS = {
   knight: './rpg/characters/Knight.glb',
+  barbarian: './rpg/characters/Barbarian.glb',
+  rogue: './rpg/characters/Rogue.glb',
+  mage: './rpg/characters/Mage.glb',
+  ranger: './rpg/characters/Ranger.glb',
   skeletonMinion: './rpg/characters/Skeleton_Minion.glb',
   skeletonWarrior: './rpg/characters/Skeleton_Warrior.glb',
   rigGeneral: './rpg/anims/Rig_Medium_General.glb',
   rigMovement: './rpg/anims/Rig_Medium_MovementBasic.glb',
   rigCombat: './rpg/anims/Rig_Medium_CombatMelee.glb',
   rigMovementAdvanced: './rpg/anims/Rig_Medium_MovementAdvanced.glb',
+  rigRanged: './rpg/anims/Rig_Medium_CombatRanged.glb',
   sword: './rpg/weapons/sword_A.gltf',
   shield: './rpg/weapons/shield_A.gltf',
+  axeTwoHanded: './rpg/weapons/axe_2handed.gltf',
+  shieldBarbarian: './rpg/weapons/shield_round_barbarian.gltf',
+  dagger: './rpg/weapons/dagger.gltf',
+  staff: './rpg/weapons/staff.gltf',
+  bow: './rpg/weapons/bow_withString.gltf',
+  arrow: './rpg/weapons/arrow_bow.gltf',
   skeletonBlade: './rpg/weapons/Skeleton_Blade.gltf',
   skeletonAxe: './rpg/weapons/Skeleton_Axe.gltf',
   skeletonShield: './rpg/weapons/Skeleton_Shield_Large_A.gltf',
@@ -170,15 +181,21 @@ export interface DodgeMotion {
 
 export const DODGE_MOTION = new Map<string, DodgeMotion>();
 
+/**
+ * Every file that contributes clips. All of them target the same 23-bone
+ * `Rig_Medium` skeleton with identical joint names, so a clip from any file
+ * binds to any character built on that rig.
+ */
+export const CLIP_SOURCES = [
+  ASSETS.rigGeneral,
+  ASSETS.rigMovement,
+  ASSETS.rigCombat,
+  ASSETS.rigMovementAdvanced,
+  ASSETS.rigRanged,
+] as const;
+
 export async function loadClipSet(): Promise<Map<string, THREE.AnimationClip>> {
-  // All four KayKit rig files target the same 23-bone Rig_Medium skeleton, so a
-  // clip loaded from one plays on any character built on it.
-  const sources = await Promise.all([
-    loadModel(ASSETS.rigGeneral),
-    loadModel(ASSETS.rigMovement),
-    loadModel(ASSETS.rigCombat),
-    loadModel(ASSETS.rigMovementAdvanced),
-  ]);
+  const sources = await Promise.all(CLIP_SOURCES.map((url) => loadModel(url)));
 
   const clips = new Map<string, THREE.AnimationClip>();
   for (const source of sources) {
