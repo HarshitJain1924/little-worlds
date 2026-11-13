@@ -236,10 +236,12 @@ test('aim camera eases to a shoulder frame and preserves boom collision', () => 
   camera.snap(0, 0.25);
   camera.update(0.016, player);
   const normal = camera.distance;
+  const normalX = camera.camera.position.x;
   camera.setAiming(true);
   for (let i = 0; i < 90; i += 1) camera.update(0.016, player);
   assert.ok(camera.aimAmount > 0.98);
   assert.ok(camera.distance <= normal + 0.1, 'aim should retain a readable gameplay distance');
+  assert.ok(camera.camera.position.x > normalX + 0.8, 'aim should move to the right shoulder');
 
   obstacles.push({ kind: 'box', minX: -6, maxX: 6, minZ: -1, maxZ: 6, bottom: 0, top: 6 });
   camera.update(0.016, player);

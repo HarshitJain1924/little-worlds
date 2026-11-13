@@ -32,15 +32,16 @@ const RECENTER_MAX_ANGLE = 1.0;
  * top of the target. The offset is applied to the camera rig, so the avatar
  * sits outside the central aim line instead of filling the frame.
  */
-// Keep aim close to the normal gameplay distance. A short boom plus a narrow
-// FOV makes the avatar fill the screen and hides the combat lane.
-const AIM_DISTANCE = 8.2;
+// Aim is a real combat camera, not the normal exploration boom. The shorter
+// boom and narrower lens frame the bow/upper body while the shoulder offset
+// keeps the central combat lane open.
+const AIM_DISTANCE = 7.2;
 const AIM_SHOULDER = 1.35;
 /** Smaller offset under lock, so the framed enemy stays near the centre. */
-const AIM_LOCK_SHOULDER = 0.34;
+const AIM_LOCK_SHOULDER = 0.58;
 const AIM_LIFT = 0.1;
-const AIM_LOOK_AHEAD = 2.8;
-const AIM_FOV = 48;
+const AIM_LOOK_AHEAD = 2.2;
+const AIM_FOV = 52;
 const BASE_FOV = 48;
 
 /**

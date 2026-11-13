@@ -548,11 +548,10 @@ export class Player {
 
     this.charging = true;
     this.chargeTime = 0;
-    // Already drawn by the aim stance: restarting the draw over it would snap
-    // the pose, so the clip is only played when nocking from the hip.
-    if (!this.aiming) {
-      this.rig.animator.play(charge.drawClip, { once: true, fade: 0.14, clamp: true });
-    }
+    // Aim idle is the rest pose, not the charge pose. Always enter the authored
+    // draw clip, including when F/RMB aim was already held; updateLocomotion
+    // explicitly protects this clip while the charge is active.
+    this.rig.animator.play(charge.drawClip, { once: true, fade: 0.14, clamp: true });
   }
 
   /** Advances or releases a held charge; runs before the attack-start gate. */
