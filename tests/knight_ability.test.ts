@@ -80,7 +80,7 @@ function makeInput(): {
   return input;
 }
 
-function createTestEnvironment(characterId: 'knight' | 'barbarian' | 'ranger' = 'knight') {
+function createTestEnvironment(characterId: 'knight' | 'barbarian' | 'ranger' | 'rogue' = 'knight') {
   const rig = makeRig();
   const world = { heightAt: (): number => 0, blockers: [], obstacles: [] };
   const player = new Player(rig as never, world as never, { x: 0, z: 0 }, profileFor(characterId));
@@ -111,7 +111,7 @@ test('Knight ability activation eligibility and animation triggering', () => {
 });
 
 test('Adventurers without ability cannot activate', () => {
-  const { player, camera, input } = createTestEnvironment('barbarian');
+  const { player, camera, input } = createTestEnvironment('rogue');
 
   assert.equal(player.profile.ability, undefined);
   assert.equal(player.canStartAbility(), false);

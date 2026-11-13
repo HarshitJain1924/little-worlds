@@ -84,6 +84,18 @@ export class Sfx {
     this.noise(0.25, 0.14, 'lowpass', 1200, 200);
   }
 
+  /** Heavy spinning axe whoosh cutting through the air in a 360 circle. */
+  whirlwind(): void {
+    this.noise(0.42, 0.08, 'bandpass', 650, 280);
+    this.tone(140, 70, 0.38, 0.22, 'triangle');
+  }
+
+  /** Heavy axe impact from whirlwind cleaving through enemies. */
+  whirlwindHit(): void {
+    this.tone(160, 40, 0.28, 0.24, 'triangle');
+    this.noise(0.2, 0.12, 'lowpass', 1100, 220);
+  }
+
   dodge(): void {
     this.noise(0.16, 0.035, 'bandpass', 500, 1500);
   }

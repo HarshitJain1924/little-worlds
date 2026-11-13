@@ -653,8 +653,8 @@ async function boot(): Promise<void> {
     let bestEnemy: Enemy | null = null;
     let bestDist = Infinity;
     const ability = player.currentAbility;
-    const range = ability ? ability.range : 2.6;
-    const arc = ability ? ability.arc : Math.PI * 0.4;
+    const range = ability && 'range' in ability ? ability.range : 2.6;
+    const arc = ability && 'arc' in ability ? ability.arc : Math.PI * 0.4;
     const cosArc = Math.cos(arc);
 
     for (const enemy of enemies) {
@@ -683,6 +683,14 @@ async function boot(): Promise<void> {
     return bestEnemy;
   };
 
+  player.findAreaTargets = () => enemies;
+
+  player.onAbilityStart = (ability) => {
+    if (ability.kind === 'whirlwind') {
+      sfx.whirlwind();
+    }
+  };
+
   player.onAbilityHit = (target, ability) => {
     if (target && typeof target === 'object' && 'takeDamage' in target) {
       const enemy = target as Enemy;
@@ -703,9 +711,13 @@ async function boot(): Promise<void> {
         hud.damageNumber(enemy.position, ability.damage, 'dealt');
         effects.spawn(enemy.position, 'heavy');
         vfx.spawn('impactHeavy', enemy.position, player.yaw);
-        sfx.shieldRiposte();
+        if (ability.kind === 'whirlwind') {
+          sfx.whirlwindHit();
+        } else {
+          sfx.shieldRiposte();
+        }
         hitStopTimer = Math.max(hitStopTimer, 0.09);
-        cameraRig.shake(0.22);
+        cameraRig.shake(ability.kind === 'whirlwind' ? 0.24 : 0.22);
         if (!enemy.alive) sfx.enemyDeath();
       }
     }

@@ -7,7 +7,7 @@ import type { InputController } from './input';
 import { hasLineOfSight, resolveBlockers } from './collision';
 import type { World } from './world';
 import { ARENA } from './world';
-import type { AbilityProfile, CounterAbilityProfile, ChargeProfile, CombatProfile } from './movesets';
+import type { AbilityProfile, CounterAbilityProfile, WhirlwindAbilityProfile, ChargeProfile, CombatProfile } from './movesets';
 import { profileFor } from './movesets';
 import type { CharacterId } from './roster';
 
@@ -135,6 +135,24 @@ export class Player {
   onAbilityHit: ((target: unknown | null, ability: AbilityProfile) => void) | null = null;
   /** Fallback resolver to find a target in range if the countered attacker is dead or missing. */
   findFallbackTarget: (() => unknown | null) | null = null;
+  /**
+   * Optional target provider for area-of-effect abilities (e.g. Whirlwind).
+   * Returns candidate targets in the encounter for range, line-of-sight and height filtering.
+   */
+  findAreaTargets: (() => unknown[]) | null = null;
+  /**
+   * Optional custom radial sweep handler for area-of-effect abilities.
+   * If provided, executeWhirlwindSweep delegates to this rather than using findAreaTargets.
+   */
+  onAbilityRadialSweep:
+    | ((
+        position: THREE.Vector3,
+        radius: number,
+        maxVerticalOffset: number,
+        ability: WhirlwindAbilityProfile,
+        hitTargets: Set<object>,
+      ) => void)
+    | null = null;
 
   /** Cooldowns persist per character across swaps. */
   readonly abilityCooldowns: Record<CharacterId, number> = {
@@ -171,6 +189,7 @@ export class Player {
   private counterAttacker: unknown | null = null;
   private readonly counterAttackerPos = new THREE.Vector3();
   private abilityHitApplied = false;
+  private readonly abilityHitTargets = new Set<object>();
   private abilityBuffer = 0;
   private dodging = false;
   private dodgeTime = 0;
@@ -282,6 +301,10 @@ export class Player {
 
   get isCounterTriggered(): boolean {
     return this.counterTriggered;
+  }
+
+  get abilityTargetsHit(): ReadonlySet<object> {
+    return this.abilityHitTargets;
   }
 
   /**
@@ -504,8 +527,12 @@ export class Player {
       this.blocking = canBlock && (this.blocking || this.lockTimer <= 0);
 
       // Swinging, guarding and aiming all slow the character down rather than freezing them.
+      const abilityMoveScale =
+        this.isAbilityActive && this.abilityProfile && 'moveScale' in this.abilityProfile && typeof this.abilityProfile.moveScale === 'number'
+          ? this.abilityProfile.moveScale
+          : 0.15;
       const speedFactor = this.isAttacking || this.isAbilityActive
-        ? 0.15
+        ? abilityMoveScale
         : this.charging
           ? (this.profile.aim?.moveScale ?? 0.35)
           : this.aiming
@@ -784,6 +811,7 @@ export class Player {
     this.counterTriggered = false;
     this.counterAttacker = null;
     this.abilityHitApplied = false;
+    this.abilityHitTargets.clear();
     this.abilityCooldowns[this.profile.id] = ability.cooldown;
     this.blocking = false;
     this.cancelCharge();
@@ -815,6 +843,7 @@ export class Player {
     this.counterTriggered = false;
     this.counterAttacker = null;
     this.abilityHitApplied = false;
+    this.abilityHitTargets.clear();
   }
 
   private updateAbility(delta: number): void {
@@ -845,6 +874,76 @@ export class Player {
         this.abilityHitApplied = true;
         this.executeCounterRiposte(ability);
       }
+    } else if (ability.kind === 'whirlwind') {
+      const hitStart = ability.hitStart;
+      const hitEnd = ability.hitEnd;
+      const totalDuration = ability.duration;
+
+      if (clipTime < hitStart) {
+        this.abilityPhase = 'startup';
+      } else if (clipTime < hitEnd) {
+        this.abilityPhase = 'active';
+        this.executeWhirlwindSweep(ability);
+      } else if (clipTime < totalDuration) {
+        this.abilityPhase = 'recovery';
+      } else {
+        this.interruptAbility();
+        return;
+      }
+    }
+  }
+
+  private executeWhirlwindSweep(ability: WhirlwindAbilityProfile): void {
+    if (this.onAbilityRadialSweep) {
+      this.onAbilityRadialSweep(
+        this.position,
+        ability.radius,
+        ability.maxVerticalOffset ?? 1.5,
+        ability,
+        this.abilityHitTargets,
+      );
+      return;
+    }
+
+    if (!this.findAreaTargets) return;
+    const candidates = this.findAreaTargets();
+    if (!Array.isArray(candidates)) return;
+
+    const maxVertical = ability.maxVerticalOffset ?? 1.5;
+    const radiusSq = ability.radius * ability.radius;
+
+    for (const candidate of candidates) {
+      if (!candidate || typeof candidate !== 'object') continue;
+      if (this.abilityHitTargets.has(candidate)) continue;
+
+      const enemyObj = candidate as { alive?: boolean; position?: THREE.Vector3 };
+      if (enemyObj.alive === false) continue;
+      if (!enemyObj.position) continue;
+
+      const dy = Math.abs(enemyObj.position.y - this.position.y);
+      if (dy > maxVertical) continue;
+
+      const dx = enemyObj.position.x - this.position.x;
+      const dz = enemyObj.position.z - this.position.z;
+      const distSq = dx * dx + dz * dz;
+      if (distSq > radiusSq) continue;
+
+      // Obstacle line-of-sight check: do not hit through walls or solid obstacles
+      const clear =
+        !this.world.obstacles ||
+        hasLineOfSight(
+          this.position.x,
+          this.position.y + 1.2,
+          this.position.z,
+          enemyObj.position.x,
+          enemyObj.position.y + 1.2,
+          enemyObj.position.z,
+          this.world.obstacles,
+        );
+      if (!clear) continue;
+
+      this.abilityHitTargets.add(candidate);
+      this.onAbilityHit?.(candidate, ability);
     }
   }
 

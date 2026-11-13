@@ -45,8 +45,8 @@ export interface CombatProfile {
 
 /**
  * Discriminated union for signature adventurer abilities.
- * In M7.5.1, we define CounterAbilityProfile for the Knight, and union it into AbilityProfile.
- * Future sub-milestones will add SpinAbilityProfile, DashAbilityProfile, etc.
+ * In M7.5.1, we define CounterAbilityProfile for the Knight.
+ * In M7.5.2, we add WhirlwindAbilityProfile for the Barbarian.
  */
 export interface CounterAbilityProfile {
   kind: 'counter';
@@ -74,7 +74,25 @@ export interface CounterAbilityProfile {
   arc: number;
 }
 
-export type AbilityProfile = CounterAbilityProfile;
+export interface WhirlwindAbilityProfile {
+  kind: 'whirlwind';
+  id: string;
+  name: string;
+  description: string;
+  cooldown: number;
+  clip: string;
+  duration: number;
+  timeScale: number;
+  armored?: boolean;
+  hitStart: number;
+  hitEnd: number;
+  damage: number;
+  radius: number;
+  maxVerticalOffset?: number;
+  moveScale?: number;
+}
+
+export type AbilityProfile = CounterAbilityProfile | WhirlwindAbilityProfile;
 
 export interface AimProfile {
   /** Looping stance clip. */
@@ -186,6 +204,33 @@ export const KNIGHT_ABILITY: CounterAbilityProfile = {
   arc: Math.PI * 0.4,
 };
 
+/**
+ * Authored timings inside `Melee_2H_Attack_Spinning` (duration 0.667s / 20 frames @ 30fps).
+ * Root rotation begins rapid 360-degree sweep at 0.10s, completes full rotation by 0.54s,
+ * with the remaining 0.54..0.667s serving as post-spin recovery.
+ */
+export const BARBARIAN_WHIRLWIND_HIT_START = 0.10;
+export const BARBARIAN_WHIRLWIND_HIT_END = 0.54;
+export const BARBARIAN_WHIRLWIND_DURATION = 0.667;
+
+export const BARBARIAN_ABILITY: WhirlwindAbilityProfile = {
+  kind: 'whirlwind',
+  id: 'whirlwind',
+  name: 'Whirlwind',
+  description: 'Unleash a devastating 360-degree spin that cleaves all nearby foes.',
+  cooldown: 8.0,
+  clip: 'Melee_2H_Attack_Spinning',
+  duration: BARBARIAN_WHIRLWIND_DURATION,
+  timeScale: 1.0,
+  armored: true,
+  hitStart: BARBARIAN_WHIRLWIND_HIT_START,
+  hitEnd: BARBARIAN_WHIRLWIND_HIT_END,
+  damage: 55,
+  radius: 2.8,
+  maxVerticalOffset: 1.5,
+  moveScale: 0.35,
+};
+
 export const PROFILES: Record<CombatProfileId, CombatProfile> = {
   knight: {
     id: 'knight',
@@ -241,6 +286,7 @@ export const PROFILES: Record<CombatProfileId, CombatProfile> = {
       moveScale: 0.5,
       damageScale: 0.6,
     },
+    ability: BARBARIAN_ABILITY,
   },
 
   /**
