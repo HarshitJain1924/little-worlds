@@ -45,9 +45,9 @@ const config: EnemyConfig = {
   attackTimeScale: 1,
 };
 
-function makeEnemy(spawnZ = 0): { enemy: Enemy; rig: ReturnType<typeof makeRig> } {
+function makeEnemy(spawnZ = 0, obstacles: unknown[] = []): { enemy: Enemy; rig: ReturnType<typeof makeRig> } {
   const rig = makeRig();
-  const world = { heightAt: (): number => 0, blockers: [], obstacles: [] };
+  const world = { heightAt: (): number => 0, blockers: [], obstacles };
   return { enemy: new Enemy(rig as never, config, { x: 0, z: spawnZ }, world as never), rig };
 }
 
@@ -69,6 +69,10 @@ test('Enemy damage waits for the post-mixer strike frame and commits its facing'
   enterAttack(enemy, player);
   assert.equal(enemy.state, 'attack');
   assert.equal(enemy.isWindingUp, true);
+  assert.ok(
+    Math.abs(enemy.windupProgress - (1 / 60) / config.attackStrike!) < 1e-6,
+    'gameplay wind-up must include the same first frame as the attack animation',
+  );
   assert.equal(hits, 0);
 
   enemy.update(0.5, player, true);
@@ -83,7 +87,7 @@ test('Enemy damage waits for the post-mixer strike frame and commits its facing'
   // Start a fresh attack facing the player and verify the callback happens
   // after this frame has advanced the animation mixer.
   enemy.update(1.01, new THREE.Vector3(0, 0, -1.5), true);
-  enemy.update(1.0, new THREE.Vector3(0, 0, -1.5), true);
+  enemy.update(enemy.recoveryRemaining, new THREE.Vector3(0, 0, -1.5), true);
   assert.equal(enemy.state, 'attack');
   const updatesBeforeImpact = rig.animator.updates;
   enemy.update(0.6, new THREE.Vector3(0, 0, -1.5), true);
@@ -92,7 +96,7 @@ test('Enemy damage waits for the post-mixer strike frame and commits its facing'
   assert.equal(updatesAtHit, rig.animator.updates);
 });
 
-test('Enemy recovery is deterministic and remains punishable', () => {
+test('Enemy recovery stays bounded, staggered, and remains punishable', () => {
   const { enemy } = makeEnemy();
   const player = new THREE.Vector3(0, 0, -1.5);
   enterAttack(enemy, player);
@@ -100,11 +104,13 @@ test('Enemy recovery is deterministic and remains punishable', () => {
   enemy.update(0.61, player, true);
   enemy.update(0.4, player, true);
   assert.equal(enemy.state, 'chase', 'completed swing should release into recovery/chase');
+  assert.ok(enemy.recoveryRemaining >= config.attackCooldown * 0.9);
+  assert.ok(enemy.recoveryRemaining <= config.attackCooldown * 1.25);
 
-  enemy.update(0.99, player, true);
+  enemy.update(enemy.recoveryRemaining - 0.001, player, true);
   assert.equal(enemy.state, 'chase', 'cooldown should keep the enemy out of a second swing');
-  enemy.update(0.02, player, true);
-  assert.equal(enemy.state, 'attack', 'attack becomes available at the deterministic recovery boundary');
+  enemy.update(0.002, player, true);
+  assert.equal(enemy.state, 'attack', 'attack becomes available at the recovery boundary');
 });
 
 test('Enemy hit reaction interrupts attacks and death is terminal', () => {
@@ -128,4 +134,43 @@ test('Enemy hit reaction interrupts attacks and death is terminal', () => {
   enemy.update(1, player, true);
   assert.equal(enemy.state, 'dead');
   assert.equal(enemy.takeDamage(1, new THREE.Vector3(0, 0, 1)), false);
+});
+
+test('Enemy impacts respect walls, range, player death, interruption, and reset', () => {
+  const wall = { kind: 'box' as const, minX: -1, maxX: 1, minZ: -1.0, maxZ: -0.5, bottom: 0, top: 3 };
+  const blocked = makeEnemy(0, [wall]);
+  const blockedPlayer = new THREE.Vector3(0, 0, -1.5);
+  let blockedHits = 0;
+  blocked.enemy.onHitPlayer = () => { blockedHits += 1; };
+  enterAttack(blocked.enemy, blockedPlayer);
+  blocked.enemy.update(0.6, blockedPlayer, true);
+  assert.equal(blockedHits, 0, 'attacks must not hit through walls');
+
+  const outOfRange = makeEnemy();
+  const distantPlayer = new THREE.Vector3(0, 0, -1.5);
+  let rangeHits = 0;
+  outOfRange.enemy.onHitPlayer = () => { rangeHits += 1; };
+  enterAttack(outOfRange.enemy, distantPlayer);
+  distantPlayer.z = -3.2;
+  outOfRange.enemy.update(0.6, distantPlayer, true);
+  assert.equal(rangeHits, 0, 'attacks must not hit beyond their valid range');
+
+  const deadPlayer = makeEnemy();
+  const deadPlayerPosition = new THREE.Vector3(0, 0, -1.5);
+  let deadPlayerHits = 0;
+  deadPlayer.enemy.onHitPlayer = () => { deadPlayerHits += 1; };
+  enterAttack(deadPlayer.enemy, deadPlayerPosition);
+  deadPlayer.enemy.update(0.6, deadPlayerPosition, false);
+  assert.equal(deadPlayerHits, 0, 'dead players must not receive pending damage');
+
+  const reset = makeEnemy();
+  const resetPlayer = new THREE.Vector3(0, 0, -1.5);
+  let resetHits = 0;
+  reset.enemy.onHitPlayer = () => { resetHits += 1; };
+  enterAttack(reset.enemy, resetPlayer);
+  reset.enemy.reset();
+  assert.equal(reset.enemy.state, 'idle');
+  assert.equal(reset.enemy.isWindingUp, false);
+  reset.enemy.update(0.6, resetPlayer, true);
+  assert.equal(resetHits, 0, 'reset must clear pending attack impact state');
 });

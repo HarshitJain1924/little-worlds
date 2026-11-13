@@ -81,6 +81,10 @@ export class Enemy {
     return this.alive && this.state !== 'dead';
   }
 
+  get recoveryRemaining(): number {
+    return this.cooldown;
+  }
+
   /** True between committing to a swing and the blow actually landing. */
   get isWindingUp(): boolean {
     return this.state === 'attack' && !this.attackLanded;
@@ -127,7 +131,9 @@ export class Enemy {
           }
           if (distance < this.config.attackRange && this.cooldown <= 0) {
             this.state = 'attack';
-            this.stateTimer = 0;
+            // The animator is advanced at the end of this same update, so the
+            // gameplay clock includes this frame too.
+            this.stateTimer = delta;
             this.attackLanded = false;
             this.attackImpactPending = false;
             this.rig.animator.play(this.config.attackClip ?? DEFAULT_ATTACK_CLIP, {
@@ -168,8 +174,8 @@ export class Enemy {
           }
 
           if (this.stateTimer >= duration) {
-            // The cooldown is the readable, exploitable recovery window.
-            this.cooldown = this.config.attackCooldown;
+            // Keep recovery readable while staggering a group of enemies.
+            this.cooldown = this.config.attackCooldown * (0.9 + Math.random() * 0.35);
             this.state = 'chase';
             this.stateTimer = 0;
           }
