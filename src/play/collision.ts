@@ -392,29 +392,19 @@ function rimFPrime(
   return wPrime - Rc * (uPrime / sqrtU);
 }
 
-function addQuadraticRoots(
-  roots: number[],
-  a: number,
-  b: number,
-  c: number,
-  low: number,
-  high: number,
-): void {
-  if (Math.abs(a) < 1e-14) {
-    if (Math.abs(b) >= 1e-14) {
-      const t = -c / b;
-      if (t > low && t < high) roots.push(t);
-    }
-    return;
-  }
-
-  const discriminant = b * b - 4 * a * c;
-  if (discriminant < 0) return;
-  const sqrtDiscriminant = Math.sqrt(Math.max(0, discriminant));
-  const t1 = (-b - sqrtDiscriminant) / (2 * a);
-  const t2 = (-b + sqrtDiscriminant) / (2 * a);
-  if (t1 > low && t1 < high) roots.push(t1);
-  if (t2 > low && t2 < high && Math.abs(t2 - t1) > 1e-14) roots.push(t2);
+function isRimRegionAt(
+  t: number,
+  h2: number,
+  h1: number,
+  h0: number,
+  radiusSq: number,
+  p0y: number,
+  dy: number,
+  capSide: 1 | -1,
+): boolean {
+  const u = h2 * t * t + h1 * t + h0;
+  const y = p0y + dy * t;
+  return u >= radiusSq - 1e-12 && capSide * y >= -1e-12;
 }
 
 /**
@@ -456,46 +446,70 @@ function intersectCylinderRim(
   const high = tOut;
   const radiusSq = Rc * Rc;
   const thresholdSq = R * R;
-  const roots = [low, high];
 
-  // The formula with the horizontal clamp changes at rho = Rc. The cap-side
-  // formula changes at y = 0 relative to the selected rim circle.
-  addQuadraticRoots(roots, h2, h1, h0 - radiusSq, low, high);
-  if (Math.abs(dy) >= 1e-14) {
-    const capCrossing = -p0y / dy;
-    if (capCrossing > low && capCrossing < high) roots.push(capCrossing);
-  }
-  roots.sort((a, b) => a - b);
-
-  const uniqueRoots: number[] = [];
-  for (const root of roots) {
-    if (uniqueRoots.length === 0 || Math.abs(root - uniqueRoots[uniqueRoots.length - 1]) > 1e-13) {
-      uniqueRoots.push(root);
+  // There are at most four transitions: two roots of rho = Rc, one cap-plane
+  // crossing, and the two interval endpoints. Keep them in scalar slots;
+  // their count is fixed by the quadratic geometry.
+  let transition1 = high;
+  let transition2 = high;
+  let transition3 = high;
+  if (Math.abs(h2) < 1e-14) {
+    if (Math.abs(h1) >= 1e-14) {
+      const root = - (h0 - radiusSq) / h1;
+      if (root > low && root < high) transition1 = root;
+    }
+  } else {
+    const discriminant = h1 * h1 - 4 * h2 * (h0 - radiusSq);
+    if (discriminant >= 0) {
+      const sqrtDiscriminant = Math.sqrt(Math.max(0, discriminant));
+      const root1 = (-h1 - sqrtDiscriminant) / (2 * h2);
+      const root2 = (-h1 + sqrtDiscriminant) / (2 * h2);
+      if (root1 > low && root1 < high) transition1 = root1;
+      if (root2 > low && root2 < high) {
+        if (transition1 === high) transition1 = root2;
+        else transition2 = root2;
+      }
     }
   }
+  if (Math.abs(dy) >= 1e-14) {
+    const capCrossing = -p0y / dy;
+    if (capCrossing > low && capCrossing < high) transition3 = capCrossing;
+  }
 
-  const isRimRegion = (t: number): boolean => {
-    const u = h2 * t * t + h1 * t + h0;
-    const y = p0y + dy * t;
-    return u >= radiusSq - 1e-12 && capSide * y >= -1e-12;
-  };
+  let r0 = low;
+  let r1 = transition1;
+  let r2 = transition2;
+  let r3 = transition3;
+  let r4 = high;
+  let swap: number;
+  if (r0 > r1) { swap = r0; r0 = r1; r1 = swap; }
+  if (r1 > r2) { swap = r1; r1 = r2; r2 = swap; }
+  if (r2 > r3) { swap = r2; r2 = r3; r3 = swap; }
+  if (r3 > r4) { swap = r3; r3 = r4; r4 = swap; }
+  if (r0 > r1) { swap = r0; r0 = r1; r1 = swap; }
+  if (r1 > r2) { swap = r1; r1 = r2; r2 = swap; }
+  if (r2 > r3) { swap = r2; r2 = r3; r3 = swap; }
+  if (r0 > r1) { swap = r0; r0 = r1; r1 = swap; }
+  if (r1 > r2) { swap = r1; r1 = r2; r2 = swap; }
+  if (r0 > r1) { swap = r0; r0 = r1; r1 = swap; }
 
   // Check exact region boundaries as they are reached. This includes a
   // tangent that occurs exactly at a clamp transition, while preserving the
   // earliest contact from the preceding interval.
   if (
-    isRimRegion(uniqueRoots[0]) &&
-    rimDistSq(uniqueRoots[0], h2, h1, h0, p0y, dy, Rc) <= thresholdSq + 1e-10
+    isRimRegionAt(r0, h2, h1, h0, radiusSq, p0y, dy, capSide) &&
+    rimDistSq(r0, h2, h1, h0, p0y, dy, Rc) <= thresholdSq + 1e-10
   ) {
-    return uniqueRoots[0];
+    return r0;
   }
-  for (let interval = 0; interval + 1 < uniqueRoots.length; interval += 1) {
-    const a = uniqueRoots[interval];
-    const b = uniqueRoots[interval + 1];
+  for (let interval = 0; interval < 4; interval += 1) {
+    const a = interval === 0 ? r0 : interval === 1 ? r1 : interval === 2 ? r2 : r3;
+    const b = interval === 0 ? r1 : interval === 1 ? r2 : interval === 2 ? r3 : r4;
+    if (b - a <= 1e-13) continue;
     const mid = (a + b) * 0.5;
-    if (!isRimRegion(mid)) {
+    if (!isRimRegionAt(mid, h2, h1, h0, radiusSq, p0y, dy, capSide)) {
       if (
-        isRimRegion(b) &&
+        isRimRegionAt(b, h2, h1, h0, radiusSq, p0y, dy, capSide) &&
         rimDistSq(b, h2, h1, h0, p0y, dy, Rc) <= thresholdSq + 1e-10
       ) {
         return b;
@@ -523,7 +537,7 @@ function intersectCylinderRim(
 
     if (rimDistSq(tStar, h2, h1, h0, p0y, dy, Rc) > thresholdSq + 1e-10) {
       if (
-        isRimRegion(b) &&
+        isRimRegionAt(b, h2, h1, h0, radiusSq, p0y, dy, capSide) &&
         rimDistSq(b, h2, h1, h0, p0y, dy, Rc) <= thresholdSq + 1e-10
       ) {
         return b;
