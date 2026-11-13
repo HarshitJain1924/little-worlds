@@ -354,17 +354,121 @@ export function segmentBoxEntry(
 }
 
 /**
- * Squared 3D distance from a point (x, y, z) to a vertical cylinder volume.
+ * Squared 3D distance from a point along a segment to a cylinder rim circle.
  */
-function distSqToCylinder(x: number, y: number, z: number, cyl: CylinderObstacle): number {
-  const ox = x - cyl.x;
-  const oz = z - cyl.z;
-  const dXZ = Math.hypot(ox, oz);
-  const deltaH = Math.max(0, dXZ - cyl.radius);
-  let deltaV = 0;
-  if (y > cyl.top) deltaV = y - cyl.top;
-  else if (y < cyl.bottom) deltaV = cyl.bottom - y;
-  return deltaH * deltaH + deltaV * deltaV;
+function rimDistSq(
+  t: number,
+  h2: number,
+  h1: number,
+  h0: number,
+  p0y: number,
+  dy: number,
+  Rc: number,
+): number {
+  const u = Math.max(0, h2 * t * t + h1 * t + h0);
+  const deltaH = Math.max(0, Math.sqrt(u) - Rc);
+  const y = p0y + dy * t;
+  return deltaH * deltaH + y * y;
+}
+
+/**
+ * Exact derivative of squared distance to the rim circle with respect to parameter t.
+ * Strictly monotonic along any straight line in the rim region, enabling exact root solving.
+ */
+function rimFPrime(
+  t: number,
+  h2: number,
+  h1: number,
+  h0: number,
+  d2: number,
+  p0DotD: number,
+  Rc: number,
+): number {
+  const u = Math.max(1e-12, h2 * t * t + h1 * t + h0);
+  const sqrtU = Math.sqrt(u);
+  const uPrime = 2 * h2 * t + h1;
+  const wPrime = 2 * (d2 * t + p0DotD);
+  return wPrime - Rc * (uPrime / sqrtU);
+}
+
+/**
+ * Exact continuous swept-sphere vs cylinder rim quarter-torus intersection.
+ * Finds the earliest parameter t in [tIn, tOut] where distance to the rim circle is <= R.
+ * Uses exact derivative bisection to locate the unique point of closest approach t*,
+ * guaranteeing narrow contact intervals and tangent contacts cannot be missed.
+ */
+function intersectCylinderRim(
+  fromX: number,
+  fromY: number,
+  fromZ: number,
+  dx: number,
+  dy: number,
+  dz: number,
+  cylX: number,
+  cylZ: number,
+  Rc: number,
+  yCap: number,
+  R: number,
+  tIn: number,
+  tOut: number,
+): number {
+  const p0x = fromX - cylX;
+  const p0z = fromZ - cylZ;
+  const p0y = fromY - yCap;
+
+  const h2 = dx * dx + dz * dz;
+  const h1 = 2 * (p0x * dx + p0z * dz);
+  const h0 = p0x * p0x + p0z * p0z;
+
+  const d2 = dx * dx + dy * dy + dz * dz;
+  const p0DotD = p0x * dx + p0y * dy + p0z * dz;
+
+  const low = tIn;
+  const high = tOut;
+
+  const fpLow = rimFPrime(low, h2, h1, h0, d2, p0DotD, Rc);
+  const fpHigh = rimFPrime(high, h2, h1, h0, d2, p0DotD, Rc);
+
+  let tStar: number;
+  if (fpLow >= 0) {
+    tStar = low;
+  } else if (fpHigh <= 0) {
+    tStar = high;
+  } else {
+    let a = low;
+    let b = high;
+    for (let i = 0; i < 32; i += 1) {
+      const mid = (a + b) * 0.5;
+      if (rimFPrime(mid, h2, h1, h0, d2, p0DotD, Rc) <= 0) {
+        a = mid;
+      } else {
+        b = mid;
+      }
+    }
+    tStar = (a + b) * 0.5;
+  }
+
+  const minDistSq = rimDistSq(tStar, h2, h1, h0, p0y, dy, Rc);
+  if (minDistSq > R * R + 1e-10) {
+    return 1;
+  }
+
+  if (rimDistSq(low, h2, h1, h0, p0y, dy, Rc) <= R * R) {
+    return low;
+  }
+
+  let rootA = low;
+  let rootB = tStar;
+  for (let i = 0; i < 32; i += 1) {
+    const mid = (rootA + rootB) * 0.5;
+    if (rimDistSq(mid, h2, h1, h0, p0y, dy, Rc) <= R * R) {
+      rootB = mid;
+    } else {
+      rootA = mid;
+    }
+  }
+
+  return rootB;
 }
 
 /** Same contract as segmentBoxEntry, for a vertical cylinder. */
@@ -474,41 +578,46 @@ export function segmentCylinderEntry(
   }
 
   // If entry point lands on the rounded torus rim:
-  // Find entry time into the rounded boundary using convex sampling & bisection.
-  let low = clampIn;
-  let high = clampOut;
+  // Determine which rim was approached and solve exact continuous collision:
+  const yAtEntry = fromY + dy * clampIn;
+  const primaryCap = yAtEntry >= cylinder.top ? cylinder.top : cylinder.bottom;
 
-  const dOut = distSqToCylinder(fromX + dx * high, fromY + dy * high, fromZ + dz * high, cylinder);
-  if (dOut > R * R) {
-    let minD = dOut;
-    let minT = high;
-    for (let i = 1; i <= 7; i += 1) {
-      const sampleT = low + (high - low) * (i / 8);
-      const d = distSqToCylinder(fromX + dx * sampleT, fromY + dy * sampleT, fromZ + dz * sampleT, cylinder);
-      if (d < minD) {
-        minD = d;
-        minT = sampleT;
-      }
-    }
-    if (minD > R * R + 1e-9) {
-      // Cleared the rounded rim
-      return 1;
-    }
-    high = minT;
+  let tRim = intersectCylinderRim(
+    fromX,
+    fromY,
+    fromZ,
+    dx,
+    dy,
+    dz,
+    cylinder.x,
+    cylinder.z,
+    cylinder.radius,
+    primaryCap,
+    R,
+    clampIn,
+    clampOut,
+  );
+
+  if (tRim === 1) {
+    const secondaryCap = primaryCap === cylinder.top ? cylinder.bottom : cylinder.top;
+    tRim = intersectCylinderRim(
+      fromX,
+      fromY,
+      fromZ,
+      dx,
+      dy,
+      dz,
+      cylinder.x,
+      cylinder.z,
+      cylinder.radius,
+      secondaryCap,
+      R,
+      clampIn,
+      clampOut,
+    );
   }
 
-  // Bisect to find the exact boundary crossing where distSq == R^2
-  for (let iter = 0; iter < 16; iter += 1) {
-    const mid = (low + high) * 0.5;
-    const d = distSqToCylinder(fromX + dx * mid, fromY + dy * mid, fromZ + dz * mid, cylinder);
-    if (d <= R * R) {
-      high = mid;
-    } else {
-      low = mid;
-    }
-  }
-
-  return high;
+  return tRim;
 }
 
 /** Nearest blocking t along the segment, 1 when the path is clear. */

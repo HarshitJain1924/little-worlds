@@ -432,3 +432,274 @@ test('Nearest collision ordering: obstacle in front blocks shot, enemy in front 
   assert.equal(impactB!.kind, 'target');
   assert.equal(targetInFront.hits, 1);
 });
+
+// -----------------------------------------------------------------------------
+// 4. Exact Continuous Swept-Sphere vs Cylinder Rim Tests
+// -----------------------------------------------------------------------------
+
+test('Exact tangent contact on the rounded upper rim', () => {
+  const cylinder: CylinderObstacle = {
+    kind: 'cylinder',
+    x: 0,
+    z: 0,
+    radius: 1.0,
+    bottom: 0,
+    top: 2.0,
+  };
+  const R = 0.5;
+
+  // Upper rim circle is at y = 2.0, radius 1.0.
+  // At height y = 2.3, deltaY = 0.3.
+  // Distance to circle equals R = 0.5 when (rho - 1.0)^2 + 0.3^2 = 0.5^2 = 0.25
+  // (rho - 1.0)^2 = 0.16 => rho = 1.40.
+  // Horizontal ray parallel to Z at x = 1.40, y = 2.3, from z = 1.0 to z = -1.0
+  // Closest approach is at z = 0 (t = 0.5), where rho = 1.40, distance = exactly 0.5!
+  const t = segmentCylinderEntry(1.40, 2.3, 1.0, 1.40, 2.3, -1.0, cylinder, R);
+  assert.ok(t < 1, 'Exact tangent contact must register a collision');
+  assert.ok(Math.abs(t - 0.5) < 1e-4, `Expected tangent entry near t=0.5, got ${t}`);
+
+  // Contact point on cylinder surface should be clamped to the rim at (1.0, 2.0, 0)
+  const contact = { x: 0, y: 0, z: 0 };
+  contactPointCylinder(1.40, 2.3, 0, cylinder, contact);
+  assert.ok(Math.abs(contact.x - 1.0) < 1e-5);
+  assert.ok(Math.abs(contact.y - 2.0) < 1e-5);
+  assert.ok(Math.abs(contact.z - 0) < 1e-5);
+});
+
+test('Exact tangent contact on the rounded lower rim', () => {
+  const cylinder: CylinderObstacle = {
+    kind: 'cylinder',
+    x: 0,
+    z: 0,
+    radius: 1.0,
+    bottom: 0,
+    top: 2.0,
+  };
+  const R = 0.5;
+
+  // Lower rim circle is at y = 0, radius 1.0.
+  // At height y = -0.3, deltaY = -0.3.
+  // Distance to circle equals R = 0.5 when rho = 1.40.
+  // Horizontal ray parallel to Z at x = 1.40, y = -0.3, from z = 1.0 to z = -1.0
+  // Tangent at z = 0 (t = 0.5).
+  const t = segmentCylinderEntry(1.40, -0.3, 1.0, 1.40, -0.3, -1.0, cylinder, R);
+  assert.ok(t < 1, 'Exact tangent contact on lower rim must register a collision');
+  assert.ok(Math.abs(t - 0.5) < 1e-4, `Expected lower tangent entry near t=0.5, got ${t}`);
+
+  // Contact point on cylinder surface clamped to lower rim at (1.0, 0, 0)
+  const contact = { x: 0, y: 0, z: 0 };
+  contactPointCylinder(1.40, -0.3, 0, cylinder, contact);
+  assert.ok(Math.abs(contact.x - 1.0) < 1e-5);
+  assert.ok(Math.abs(contact.y - 0) < 1e-5);
+  assert.ok(Math.abs(contact.z - 0) < 1e-5);
+});
+
+test('Near-tangent collision with an extremely narrow contact interval', () => {
+  const cylinder: CylinderObstacle = {
+    kind: 'cylinder',
+    x: 0,
+    z: 0,
+    radius: 1.0,
+    bottom: 0,
+    top: 2.0,
+  };
+  const R = 0.5;
+
+  // x = 1.39999 at y = 2.3: penetration depth into rim is only 0.00001m (10 micrometers)
+  // Contact interval along Z is [-0.0053, 0.0053] (interval width ~ 0.0053 in parameter t)
+  const t = segmentCylinderEntry(1.39999, 2.3, 1.0, 1.39999, 2.3, -1.0, cylinder, R);
+  assert.ok(t < 1, 'Near-tangent penetration of 10um must be reliably detected');
+  assert.ok(Math.abs(t - 0.5) < 0.01, `Expected entry near t=0.5, got ${t}`);
+});
+
+test('A trajectory that narrowly misses the rim clears with t = 1', () => {
+  const cylinder: CylinderObstacle = {
+    kind: 'cylinder',
+    x: 0,
+    z: 0,
+    radius: 1.0,
+    bottom: 0,
+    top: 2.0,
+  };
+  const R = 0.5;
+
+  // x = 1.4005 at y = 2.3: closest approach distance is ~0.5004m > 0.50m (misses by 0.4mm)
+  const t = segmentCylinderEntry(1.4005, 2.3, 1.0, 1.4005, 2.3, -1.0, cylinder, R);
+  assert.equal(t, 1, 'Trajectory missing by 0.4mm must clear without collision');
+});
+
+test('A trajectory starting outside enters through the rounded rim', () => {
+  const cylinder: CylinderObstacle = {
+    kind: 'cylinder',
+    x: 0,
+    z: 0,
+    radius: 1.0,
+    bottom: 0,
+    top: 2.0,
+  };
+  const R = 0.5;
+
+  // Starts at (2.0, 3.0, 0) and dives diagonally toward (0.5, 1.5, 0)
+  // Distance at start: deltaH = 2.0 - 1.0 = 1.0, deltaV = 3.0 - 2.0 = 1.0 => dist = sqrt(2) ~= 1.414 > 0.5
+  // End point is inside cylinder: deltaH = 0, deltaV = 0 => dist = 0
+  const t = segmentCylinderEntry(2.0, 3.0, 0, 0.5, 1.5, 0, cylinder, R);
+  assert.ok(t > 0 && t < 1, `Must enter through the rounded rim, got t=${t}`);
+
+  // At entry point, distance to rim circle (radius 1.0 at y=2.0) must equal R = 0.5
+  const entryX = 2.0 + (0.5 - 2.0) * t;
+  const entryY = 3.0 + (1.5 - 3.0) * t;
+  const distToRim = Math.hypot(entryX - 1.0, entryY - 2.0);
+  assert.ok(Math.abs(distToRim - R) < 1e-4, `Expected entry distance ${R}, got ${distToRim}`);
+});
+
+test('Regression: narrow rim collision missed by 7-sample implementation is detected', () => {
+  // Constructed case where the old 7-sample fixed grid steps completely over the contact interval:
+  // Cylinder at (0, 0), radius 1.0, height [0, 2.0], R = 0.5.
+  // Bounding cylinder radius = 1.50. Horizontal path at y = 2.3, x = 1.3996.
+  // Penetration interval is |z| <= 0.03346m.
+  // Segment: z starts at 0.450 and ends at -0.639 (deltaZ = -1.089).
+  // The closest approach (z = 0) occurs at t* = 0.450 / 1.089 = 0.41322.
+  // The collision interval in parameter t is [0.3825, 0.4439].
+  // The 7 fixed samples of the old implementation were at i/8 * tOut:
+  // Sample 3 is at t = 0.3408 (z = 0.0789 > 0.0335, outside!).
+  // Sample 4 is at t = 0.4543 (z = -0.0448, |-0.0448| > 0.0335, outside!).
+  // The old 7-sample code saw ALL 7 samples outside and returned 1 (false miss).
+  // The exact continuous root-solver detects the collision reliably.
+  const cylinder: CylinderObstacle = {
+    kind: 'cylinder',
+    x: 0,
+    z: 0,
+    radius: 1.0,
+    bottom: 0,
+    top: 2.0,
+  };
+  const R = 0.5;
+
+  const t = segmentCylinderEntry(1.3996, 2.3, 0.450, 1.3996, 2.3, -0.639, cylinder, R);
+  assert.ok(t < 1, 'Narrow collision missed by 7-sample implementation must be detected');
+  assert.ok(t >= 0.38 && t <= 0.40, `Expected entry parameter near 0.385, got ${t}`);
+});
+
+test('Diagonal trajectories entering through cylinder side and caps', () => {
+  const cylinder: CylinderObstacle = {
+    kind: 'cylinder',
+    x: 0,
+    z: 0,
+    radius: 1.5,
+    bottom: 0,
+    top: 3.0,
+  };
+  const R = 0.48;
+
+  // 1. Diagonal entry through top cap:
+  // Segment moves diagonally downwards from (0.2, 5.0, 0.2) to (0.2, 1.0, 0.2)
+  // Horizontal radius is 0.2 < 1.5 (inside top cap disk)
+  // Enters top cap at y = 3.0 + 0.48 = 3.48
+  const tCap = segmentCylinderEntry(0.2, 5.0, 0.2, 0.2, 1.0, 0.2, cylinder, R);
+  assert.ok(tCap < 1);
+  const hitYCap = 5.0 + (1.0 - 5.0) * tCap;
+  assert.ok(Math.abs(hitYCap - 3.48) < 1e-4, `Expected cap hit at y=3.48, got ${hitYCap}`);
+
+  // 2. Diagonal entry through side wall:
+  // Starts far in X at x = 5.0, y = 1.5, moving diagonally to x = -2.0, y = 1.5
+  // Enters side wall at x = 1.5 + 0.48 = 1.98
+  const tSide = segmentCylinderEntry(5.0, 1.5, 0, -2.0, 1.5, 0, cylinder, R);
+  assert.ok(tSide < 1);
+  const hitXSide = 5.0 + (-2.0 - 5.0) * tSide;
+  assert.ok(Math.abs(hitXSide - 1.98) < 1e-4, `Expected side hit at x=1.98, got ${hitXSide}`);
+});
+
+test('Starting overlap and zero-length behavior on cylinder', () => {
+  const cylinder: CylinderObstacle = {
+    kind: 'cylinder',
+    x: 0,
+    z: 0,
+    radius: 1.0,
+    bottom: 0,
+    top: 2.0,
+  };
+  const R = 0.5;
+
+  // Starts strictly on the upper rim boundary: distance to rim circle = 0.5
+  // (x = 1.40, y = 2.3, z = 0) has distance sqrt(0.4^2 + 0.3^2) = 0.5
+  const tOnRim = segmentCylinderEntry(1.40, 2.3, 0, 5, 2.3, 0, cylinder, R);
+  assert.equal(tOnRim, 0, 'Starting on upper rim boundary returns 0');
+
+  // Starts on lower rim boundary
+  const tOnLowerRim = segmentCylinderEntry(1.40, -0.3, 0, 5, -0.3, 0, cylinder, R);
+  assert.equal(tOnLowerRim, 0, 'Starting on lower rim boundary returns 0');
+
+  // Zero-length segment outside cylinder returns 1
+  const tZero = segmentCylinderEntry(10, 10, 10, 10, 10, 10, cylinder, R);
+  assert.equal(tZero, 1, 'Zero-length segment outside cylinder returns 1');
+});
+
+test('Radius-zero arrow behavior on cylinder remains exact and unchanged', () => {
+  const cylinder: CylinderObstacle = {
+    kind: 'cylinder',
+    x: 0,
+    z: 0,
+    radius: 1.0,
+    bottom: 0,
+    top: 2.0,
+  };
+
+  // 1. Thin arrow passes at x = 1.02, y = 2.1 (above top and outside side): must clear
+  const tClear = segmentCylinderEntry(1.02, 2.1, 5, 1.02, 2.1, -5, cylinder, 0);
+  assert.equal(tClear, 1, 'Thin arrow clearing cylinder must return 1');
+
+  // 2. Thin arrow hitting top cap at y = 2.0:
+  // Origin (0, 5, 0), down to (0, -1, 0). Length 6m. Enters at y = 2.0 (t = 3/6 = 0.5)
+  const tCap = segmentCylinderEntry(0, 5, 0, 0, -1, 0, cylinder, 0);
+  assert.ok(Math.abs(tCap - 0.5) < 1e-5, `Expected unpadded cap hit at t=0.5, got ${tCap}`);
+
+  // 3. Thin arrow hitting side at radius 1.0:
+  // Origin (5, 1.0, 0), to (-5, 1.0, 0). Enters at x = 1.0 (t = 4/10 = 0.4)
+  const tSide = segmentCylinderEntry(5, 1.0, 0, -5, 1.0, 0, cylinder, 0);
+  assert.ok(Math.abs(tSide - 0.4) < 1e-5, `Expected unpadded side hit at t=0.4, got ${tSide}`);
+});
+
+test('Runtime ProjectilePool and solveShot agree on rounded cylinder rim geometry and contact point', () => {
+  const cylinder: CylinderObstacle = {
+    kind: 'cylinder',
+    x: 0,
+    z: -10,
+    radius: 1.0,
+    bottom: 0,
+    top: 2.0,
+  };
+  const field: ProjectileField = { obstacles: [cylinder], heightAt: () => 0 };
+  const orbRadius = 0.48;
+
+  // Shoot an arcane orb diagonally into the cylinder upper rim
+  const origin = new THREE.Vector3(1.35, 2.5, 0);
+  const direction = new THREE.Vector3(0, -0.05, -1).normalize();
+  const maxRange = 25;
+
+  const aimPoint = new THREE.Vector3();
+  const aimSol = solveShot(origin, direction, field, [], maxRange, aimPoint, orbRadius);
+  assert.equal(aimSol.kind, 'obstacle');
+
+  // Runtime pool
+  const scene = new THREE.Scene();
+  const pool = new ProjectilePool(scene, field, { arcaneOrb: dummyVisual() }, 4);
+  let poolImpact: Impact | null = null;
+  pool.spawn({
+    origin,
+    direction,
+    speed: 20,
+    damage: 65,
+    maxRange,
+    kind: 'arcaneOrb',
+    radius: orbRadius,
+    explosive: true,
+  });
+  pool.update(1.0, [], (imp) => { poolImpact = imp; });
+
+  assert.ok(poolImpact);
+  assert.equal(poolImpact!.kind, 'obstacle');
+  assert.ok(
+    aimPoint.distanceTo(poolImpact!.position) < 1e-4,
+    `solveShot (${aimPoint.toArray()}) and pool (${poolImpact!.position.toArray()}) must produce identical contact position`,
+  );
+});
