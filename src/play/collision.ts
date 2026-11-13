@@ -13,8 +13,10 @@ export interface BoxObstacle {
   maxX: number;
   minZ: number;
   maxZ: number;
-  bottom: number;
-  top: number;
+  bottom?: number;
+  top?: number;
+  minY?: number;
+  maxY?: number;
 }
 
 export interface CylinderObstacle {
@@ -29,6 +31,106 @@ export interface CylinderObstacle {
 export type CameraObstacle = BoxObstacle | CylinderObstacle;
 
 const EPSILON = 1e-6;
+
+/**
+ * Helper to test entry into a cylinder edge of a Minkowski-expanded AABB.
+ * Edge is parallel to axis W, situated at (edgeU, edgeV) in the other two coordinates.
+ */
+function intersectEdge(
+  fromU: number,
+  fromV: number,
+  fromW: number,
+  du: number,
+  dv: number,
+  dw: number,
+  edgeU: number,
+  edgeV: number,
+  minW: number,
+  maxW: number,
+  isMinU: boolean,
+  boundU: number,
+  isMinV: boolean,
+  boundV: number,
+  radius: number,
+  bestT: number,
+): number {
+  const d2 = du * du + dv * dv;
+  if (d2 < EPSILON) return bestT;
+
+  const ou = fromU - edgeU;
+  const ov = fromV - edgeV;
+  const b = 2 * (ou * du + ov * dv);
+  if (b >= 0) return bestT;
+
+  const c = ou * ou + ov * ov - radius * radius;
+  if (c < 0) return bestT;
+
+  const disc = b * b - 4 * d2 * c;
+  if (disc < -1e-9) return bestT;
+
+  const safeDisc = Math.max(0, disc);
+  const t = (-b - Math.sqrt(safeDisc)) / (2 * d2);
+  if (t < 0 || t >= bestT) return bestT;
+
+  const w = fromW + dw * t;
+  if (w < minW - EPSILON || w > maxW + EPSILON) return bestT;
+
+  const u = fromU + du * t;
+  const v = fromV + dv * t;
+  if (isMinU ? u > boundU + EPSILON : u < boundU - EPSILON) return bestT;
+  if (isMinV ? v > boundV + EPSILON : v < boundV - EPSILON) return bestT;
+
+  return t;
+}
+
+/**
+ * Helper to test entry into a corner sphere of a Minkowski-expanded AABB.
+ */
+function intersectCorner(
+  fromX: number,
+  fromY: number,
+  fromZ: number,
+  dx: number,
+  dy: number,
+  dz: number,
+  dLen2: number,
+  cx: number,
+  cy: number,
+  cz: number,
+  isMinX: boolean,
+  boundX: number,
+  isMinY: boolean,
+  boundY: number,
+  isMinZ: boolean,
+  boundZ: number,
+  radius: number,
+  bestT: number,
+): number {
+  const ox = fromX - cx;
+  const oy = fromY - cy;
+  const oz = fromZ - cz;
+  const b = 2 * (ox * dx + oy * dy + oz * dz);
+  if (b >= 0) return bestT;
+
+  const c = ox * ox + oy * oy + oz * oz - radius * radius;
+  if (c < 0) return bestT;
+
+  const disc = b * b - 4 * dLen2 * c;
+  if (disc < -1e-9) return bestT;
+
+  const safeDisc = Math.max(0, disc);
+  const t = (-b - Math.sqrt(safeDisc)) / (2 * dLen2);
+  if (t < 0 || t >= bestT) return bestT;
+
+  const x = fromX + dx * t;
+  const y = fromY + dy * t;
+  const z = fromZ + dz * t;
+  if (isMinX ? x > boundX + EPSILON : x < boundX - EPSILON) return bestT;
+  if (isMinY ? y > boundY + EPSILON : y < boundY - EPSILON) return bestT;
+  if (isMinZ ? z > boundZ + EPSILON : z < boundZ - EPSILON) return bestT;
+
+  return t;
+}
 
 /**
  * Entry parameter t in [0,1] along from->to, or 1 when the segment never enters
@@ -48,53 +150,221 @@ export function segmentBoxEntry(
   const dy = toY - fromY;
   const dz = toZ - fromZ;
 
+  const boxBottom = box.bottom ?? box.minY ?? 0;
+  const boxTop = box.top ?? box.maxY ?? 0;
+
+  if (padding <= 0) {
+    let entry = 0;
+    let exit = 1;
+
+    for (let axis = 0; axis < 3; axis += 1) {
+      let origin: number;
+      let delta: number;
+      let min: number;
+      let max: number;
+
+      if (axis === 0) {
+        origin = fromX;
+        delta = dx;
+        min = box.minX;
+        max = box.maxX;
+      } else if (axis === 1) {
+        origin = fromY;
+        delta = dy;
+        min = boxBottom;
+        max = boxTop;
+      } else {
+        origin = fromZ;
+        delta = dz;
+        min = box.minZ;
+        max = box.maxZ;
+      }
+
+      if (Math.abs(delta) < EPSILON) {
+        if (origin < min || origin > max) return 1;
+        continue;
+      }
+
+      let near = (min - origin) / delta;
+      let far = (max - origin) / delta;
+      if (near > far) {
+        const swap = near;
+        near = far;
+        far = swap;
+      }
+
+      if (near > entry) entry = near;
+      if (far < exit) exit = far;
+      if (entry > exit) return 1;
+    }
+
+    return entry;
+  }
+
+  // Exact continuous swept-sphere vs AABB (Minkowski sum with sphere of radius R).
+  const R = padding;
+
+  // Check if start point is already inside or touching the Minkowski sum
+  const cx = Math.max(box.minX, Math.min(box.maxX, fromX));
+  const cy = Math.max(boxBottom, Math.min(boxTop, fromY));
+  const cz = Math.max(box.minZ, Math.min(box.maxZ, fromZ));
+  const ox = fromX - cx;
+  const oy = fromY - cy;
+  const oz = fromZ - cz;
+  if (ox * ox + oy * oy + oz * oz <= R * R + 1e-10) {
+    return 0;
+  }
+
+  const dLen2 = dx * dx + dy * dy + dz * dz;
+  if (dLen2 < 1e-12) {
+    return 1;
+  }
+
+  // Slab test on the outer bounding box ([min - R, max + R]) for early rejection
   let entry = 0;
   let exit = 1;
+  let entryAxis = -1;
 
-  // Slab test, unrolled over scalars: this runs for every camera boom and every
-  // attack line-of-sight check, so it allocates nothing.
-  for (let axis = 0; axis < 3; axis += 1) {
-    let origin: number;
-    let delta: number;
-    let min: number;
-    let max: number;
-
-    if (axis === 0) {
-      origin = fromX;
-      delta = dx;
-      min = box.minX - padding;
-      max = box.maxX + padding;
-    } else if (axis === 1) {
-      origin = fromY;
-      delta = dy;
-      min = box.bottom - padding;
-      max = box.top + padding;
-    } else {
-      origin = fromZ;
-      delta = dz;
-      min = box.minZ - padding;
-      max = box.maxZ + padding;
-    }
-
-    if (Math.abs(delta) < EPSILON) {
-      if (origin < min || origin > max) return 1;
-      continue;
-    }
-
-    let near = (min - origin) / delta;
-    let far = (max - origin) / delta;
+  // X slab
+  if (Math.abs(dx) < EPSILON) {
+    if (fromX < box.minX - R || fromX > box.maxX + R) return 1;
+  } else {
+    let near = (box.minX - R - fromX) / dx;
+    let far = (box.maxX + R - fromX) / dx;
     if (near > far) {
       const swap = near;
       near = far;
       far = swap;
     }
-
-    if (near > entry) entry = near;
+    if (near > entry) {
+      entry = near;
+      entryAxis = 0;
+    }
     if (far < exit) exit = far;
     if (entry > exit) return 1;
   }
 
-  return entry;
+  // Y slab
+  if (Math.abs(dy) < EPSILON) {
+    if (fromY < boxBottom - R || fromY > boxTop + R) return 1;
+  } else {
+    let near = (boxBottom - R - fromY) / dy;
+    let far = (boxTop + R - fromY) / dy;
+    if (near > far) {
+      const swap = near;
+      near = far;
+      far = swap;
+    }
+    if (near > entry) {
+      entry = near;
+      entryAxis = 1;
+    }
+    if (far < exit) exit = far;
+    if (entry > exit) return 1;
+  }
+
+  // Z slab
+  if (Math.abs(dz) < EPSILON) {
+    if (fromZ < box.minZ - R || fromZ > box.maxZ + R) return 1;
+  } else {
+    let near = (box.minZ - R - fromZ) / dz;
+    let far = (box.maxZ + R - fromZ) / dz;
+    if (near > far) {
+      const swap = near;
+      near = far;
+      far = swap;
+    }
+    if (near > entry) {
+      entry = near;
+      entryAxis = 2;
+    }
+    if (far < exit) exit = far;
+    if (entry > exit) return 1;
+  }
+
+  if (entry > exit || entry > 1 || exit < 0) return 1;
+
+  // If entry point lands on one of the 6 flat rectangular faces of the Minkowski sum:
+  if (entryAxis >= 0 && entry >= 0 && entry <= 1) {
+    const hx = fromX + dx * entry;
+    const hy = fromY + dy * entry;
+    const hz = fromZ + dz * entry;
+    if (entryAxis === 0) {
+      if (
+        hy >= boxBottom - EPSILON &&
+        hy <= boxTop + EPSILON &&
+        hz >= box.minZ - EPSILON &&
+        hz <= box.maxZ + EPSILON
+      ) {
+        return entry;
+      }
+    } else if (entryAxis === 1) {
+      if (
+        hx >= box.minX - EPSILON &&
+        hx <= box.maxX + EPSILON &&
+        hz >= box.minZ - EPSILON &&
+        hz <= box.maxZ + EPSILON
+      ) {
+        return entry;
+      }
+    } else if (entryAxis === 2) {
+      if (
+        hx >= box.minX - EPSILON &&
+        hx <= box.maxX + EPSILON &&
+        hy >= boxBottom - EPSILON &&
+        hy <= boxTop + EPSILON
+      ) {
+        return entry;
+      }
+    }
+  }
+
+  // Otherwise, the entry must be on one of the 12 edge cylinders or 8 corner spheres.
+  let bestT = 1;
+
+  // 4 Edges parallel to Z (u = X, v = Y, w = Z)
+  bestT = intersectEdge(fromX, fromY, fromZ, dx, dy, dz, box.minX, boxBottom, box.minZ, box.maxZ, true, box.minX, true, boxBottom, R, bestT);
+  bestT = intersectEdge(fromX, fromY, fromZ, dx, dy, dz, box.minX, boxTop, box.minZ, box.maxZ, true, box.minX, false, boxTop, R, bestT);
+  bestT = intersectEdge(fromX, fromY, fromZ, dx, dy, dz, box.maxX, boxBottom, box.minZ, box.maxZ, false, box.maxX, true, boxBottom, R, bestT);
+  bestT = intersectEdge(fromX, fromY, fromZ, dx, dy, dz, box.maxX, boxTop, box.minZ, box.maxZ, false, box.maxX, false, boxTop, R, bestT);
+
+  // 4 Edges parallel to X (u = Y, v = Z, w = X)
+  bestT = intersectEdge(fromY, fromZ, fromX, dy, dz, dx, boxBottom, box.minZ, box.minX, box.maxX, true, boxBottom, true, box.minZ, R, bestT);
+  bestT = intersectEdge(fromY, fromZ, fromX, dy, dz, dx, boxBottom, box.maxZ, box.minX, box.maxX, true, boxBottom, false, box.maxZ, R, bestT);
+  bestT = intersectEdge(fromY, fromZ, fromX, dy, dz, dx, boxTop, box.minZ, box.minX, box.maxX, false, boxTop, true, box.minZ, R, bestT);
+  bestT = intersectEdge(fromY, fromZ, fromX, dy, dz, dx, boxTop, box.maxZ, box.minX, box.maxX, false, boxTop, false, box.maxZ, R, bestT);
+
+  // 4 Edges parallel to Y (u = X, v = Z, w = Y)
+  bestT = intersectEdge(fromX, fromZ, fromY, dx, dz, dy, box.minX, box.minZ, boxBottom, boxTop, true, box.minX, true, box.minZ, R, bestT);
+  bestT = intersectEdge(fromX, fromZ, fromY, dx, dz, dy, box.minX, box.maxZ, boxBottom, boxTop, true, box.minX, false, box.maxZ, R, bestT);
+  bestT = intersectEdge(fromX, fromZ, fromY, dx, dz, dy, box.maxX, box.minZ, boxBottom, boxTop, false, box.maxX, true, box.minZ, R, bestT);
+  bestT = intersectEdge(fromX, fromZ, fromY, dx, dz, dy, box.maxX, box.maxZ, boxBottom, boxTop, false, box.maxX, false, box.maxZ, R, bestT);
+
+  // 8 Corners
+  bestT = intersectCorner(fromX, fromY, fromZ, dx, dy, dz, dLen2, box.minX, boxBottom, box.minZ, true, box.minX, true, boxBottom, true, box.minZ, R, bestT);
+  bestT = intersectCorner(fromX, fromY, fromZ, dx, dy, dz, dLen2, box.minX, boxBottom, box.maxZ, true, box.minX, true, boxBottom, false, box.maxZ, R, bestT);
+  bestT = intersectCorner(fromX, fromY, fromZ, dx, dy, dz, dLen2, box.minX, boxTop, box.minZ, true, box.minX, false, boxTop, true, box.minZ, R, bestT);
+  bestT = intersectCorner(fromX, fromY, fromZ, dx, dy, dz, dLen2, box.minX, boxTop, box.maxZ, true, box.minX, false, boxTop, false, box.maxZ, R, bestT);
+  bestT = intersectCorner(fromX, fromY, fromZ, dx, dy, dz, dLen2, box.maxX, boxBottom, box.minZ, false, box.maxX, true, boxBottom, true, box.minZ, R, bestT);
+  bestT = intersectCorner(fromX, fromY, fromZ, dx, dy, dz, dLen2, box.maxX, boxBottom, box.maxZ, false, box.maxX, true, boxBottom, false, box.maxZ, R, bestT);
+  bestT = intersectCorner(fromX, fromY, fromZ, dx, dy, dz, dLen2, box.maxX, boxTop, box.minZ, false, box.maxX, false, boxTop, true, box.minZ, R, bestT);
+  bestT = intersectCorner(fromX, fromY, fromZ, dx, dy, dz, dLen2, box.maxX, boxTop, box.maxZ, false, box.maxX, false, boxTop, false, box.maxZ, R, bestT);
+
+  return bestT;
+}
+
+/**
+ * Squared 3D distance from a point (x, y, z) to a vertical cylinder volume.
+ */
+function distSqToCylinder(x: number, y: number, z: number, cyl: CylinderObstacle): number {
+  const ox = x - cyl.x;
+  const oz = z - cyl.z;
+  const dXZ = Math.hypot(ox, oz);
+  const deltaH = Math.max(0, dXZ - cyl.radius);
+  let deltaV = 0;
+  if (y > cyl.top) deltaV = y - cyl.top;
+  else if (y < cyl.bottom) deltaV = cyl.bottom - y;
+  return deltaH * deltaH + deltaV * deltaV;
 }
 
 /** Same contract as segmentBoxEntry, for a vertical cylinder. */
@@ -108,39 +378,137 @@ export function segmentCylinderEntry(
   cylinder: CylinderObstacle,
   padding = 0,
 ): number {
-  const radius = cylinder.radius + padding;
+  const R = Math.max(0, padding);
   const dx = toX - fromX;
+  const dy = toY - fromY;
   const dz = toZ - fromZ;
+
+  // Step 1: Distance check for start point
   const ox = fromX - cylinder.x;
   const oz = fromZ - cylinder.z;
+  const dXZ = Math.hypot(ox, oz);
+  const deltaH = Math.max(0, dXZ - cylinder.radius);
+  let deltaV = 0;
+  if (fromY > cylinder.top) deltaV = fromY - cylinder.top;
+  else if (fromY < cylinder.bottom) deltaV = cylinder.bottom - fromY;
 
-  const a = dx * dx + dz * dz;
-  const c = ox * ox + oz * oz - radius * radius;
-
-  let t: number;
-  if (a < EPSILON) {
-    if (c > 0) return 1;
-    t = 0;
-  } else if (c <= 0) {
-    // Already inside the footprint.
-    t = 0;
-  } else {
-    const b = 2 * (ox * dx + oz * dz);
-    const discriminant = b * b - 4 * a * c;
-    if (discriminant < 0) return 1;
-    t = (-b - Math.sqrt(discriminant)) / (2 * a);
-    if (t < 0 || t > 1) return 1;
+  const startDistSq = deltaH * deltaH + deltaV * deltaV;
+  if (startDistSq <= R * R + 1e-10) {
+    return 0;
   }
 
-  // The segment may clear the trunk by passing above it.
-  const y = fromY + (toY - fromY) * t;
-  if (y < cylinder.bottom - padding || y > cylinder.top + padding) {
-    // No entry at that height: the first contact is past the top, so treat the
-    // volume as clear for camera purposes.
+  const dLen2 = dx * dx + dy * dy + dz * dz;
+  if (dLen2 < 1e-12) {
     return 1;
   }
 
-  return t;
+  // Step 2: Unrounded bounding cylinder slab test (radius = cylinder.radius + R, vertical = [bottom - R, top + R])
+  const Rside = cylinder.radius + R;
+  const yMin = cylinder.bottom - R;
+  const yMax = cylinder.top + R;
+
+  let tVin = 0;
+  let tVout = 1;
+  if (Math.abs(dy) < EPSILON) {
+    if (fromY < yMin - EPSILON || fromY > yMax + EPSILON) return 1;
+  } else {
+    let t1 = (yMin - fromY) / dy;
+    let t2 = (yMax - fromY) / dy;
+    if (t1 > t2) {
+      const swap = t1;
+      t1 = t2;
+      t2 = swap;
+    }
+    if (t1 > tVin) tVin = t1;
+    if (t2 < tVout) tVout = t2;
+    if (tVin > tVout) return 1;
+  }
+
+  const a = dx * dx + dz * dz;
+  let tHin = 0;
+  let tHout = 1;
+  if (a < EPSILON) {
+    const c = ox * ox + oz * oz - Rside * Rside;
+    if (c > EPSILON) return 1;
+  } else {
+    const b = 2 * (ox * dx + oz * dz);
+    const c = ox * ox + oz * oz - Rside * Rside;
+    const disc = b * b - 4 * a * c;
+    if (disc < -1e-9) return 1;
+    const safeDisc = Math.max(0, disc);
+    const sqrtDisc = Math.sqrt(safeDisc);
+    tHin = (-b - sqrtDisc) / (2 * a);
+    tHout = (-b + sqrtDisc) / (2 * a);
+  }
+
+  const tIn = Math.max(tVin, tHin);
+  const tOut = Math.min(tVout, tHout);
+
+  if (tIn > tOut + EPSILON || tOut < -EPSILON || tIn > 1 + EPSILON) return 1;
+
+  // If padding is 0, the bounding cylinder is the exact cylinder.
+  if (R <= 0) {
+    return Math.max(0, tIn);
+  }
+
+  // With padding > 0:
+  const clampIn = Math.max(0, tIn);
+  const clampOut = Math.min(1, tOut);
+  if (clampIn > clampOut) return 1;
+
+  // Check if entry point is on the uncurved cylindrical side
+  if (tIn >= tVin - EPSILON && tIn <= tVout + EPSILON) {
+    const yAtEntry = fromY + dy * tIn;
+    if (yAtEntry >= cylinder.bottom - EPSILON && yAtEntry <= cylinder.top + EPSILON) {
+      return clampIn;
+    }
+  }
+
+  // Check if entry point is on the flat top or bottom cap
+  if (tIn >= tHin - EPSILON && tIn <= tHout + EPSILON) {
+    const xAtEntry = fromX + dx * tIn - cylinder.x;
+    const zAtEntry = fromZ + dz * tIn - cylinder.z;
+    if (xAtEntry * xAtEntry + zAtEntry * zAtEntry <= cylinder.radius * cylinder.radius + EPSILON) {
+      return clampIn;
+    }
+  }
+
+  // If entry point lands on the rounded torus rim:
+  // Find entry time into the rounded boundary using convex sampling & bisection.
+  let low = clampIn;
+  let high = clampOut;
+
+  const dOut = distSqToCylinder(fromX + dx * high, fromY + dy * high, fromZ + dz * high, cylinder);
+  if (dOut > R * R) {
+    let minD = dOut;
+    let minT = high;
+    for (let i = 1; i <= 7; i += 1) {
+      const sampleT = low + (high - low) * (i / 8);
+      const d = distSqToCylinder(fromX + dx * sampleT, fromY + dy * sampleT, fromZ + dz * sampleT, cylinder);
+      if (d < minD) {
+        minD = d;
+        minT = sampleT;
+      }
+    }
+    if (minD > R * R + 1e-9) {
+      // Cleared the rounded rim
+      return 1;
+    }
+    high = minT;
+  }
+
+  // Bisect to find the exact boundary crossing where distSq == R^2
+  for (let iter = 0; iter < 16; iter += 1) {
+    const mid = (low + high) * 0.5;
+    const d = distSqToCylinder(fromX + dx * mid, fromY + dy * mid, fromZ + dz * mid, cylinder);
+    if (d <= R * R) {
+      high = mid;
+    } else {
+      low = mid;
+    }
+  }
+
+  return high;
 }
 
 /** Nearest blocking t along the segment, 1 when the path is clear. */
@@ -238,18 +606,21 @@ export function contactPointBox(
   box: BoxObstacle,
   out: { x: number; y: number; z: number },
 ): void {
+  const boxBottom = box.bottom ?? box.minY ?? 0;
+  const boxTop = box.top ?? box.maxY ?? 0;
+
   if (
     pointX >= box.minX &&
     pointX <= box.maxX &&
-    pointY >= box.bottom &&
-    pointY <= box.top &&
+    pointY >= boxBottom &&
+    pointY <= boxTop &&
     pointZ >= box.minZ &&
     pointZ <= box.maxZ
   ) {
     const dMinX = pointX - box.minX;
     const dMaxX = box.maxX - pointX;
-    const dBottom = pointY - box.bottom;
-    const dTop = box.top - pointY;
+    const dBottom = pointY - boxBottom;
+    const dTop = boxTop - pointY;
     const dMinZ = pointZ - box.minZ;
     const dMaxZ = box.maxZ - pointZ;
     const minDistance = Math.min(dMinX, dMaxX, dBottom, dTop, dMinZ, dMaxZ);
@@ -260,15 +631,15 @@ export function contactPointBox(
 
     if (minDistance === dMinX) out.x = box.minX;
     else if (minDistance === dMaxX) out.x = box.maxX;
-    else if (minDistance === dBottom) out.y = box.bottom;
-    else if (minDistance === dTop) out.y = box.top;
+    else if (minDistance === dBottom) out.y = boxBottom;
+    else if (minDistance === dTop) out.y = boxTop;
     else if (minDistance === dMinZ) out.z = box.minZ;
     else out.z = box.maxZ;
     return;
   }
 
   out.x = Math.max(box.minX, Math.min(box.maxX, pointX));
-  out.y = Math.max(box.bottom, Math.min(box.top, pointY));
+  out.y = Math.max(boxBottom, Math.min(boxTop, pointY));
   out.z = Math.max(box.minZ, Math.min(box.maxZ, pointZ));
 }
 
