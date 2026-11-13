@@ -16,7 +16,7 @@ import type {
   ChargeProfile,
   CombatProfile,
 } from './movesets';
-import { profileFor } from './movesets';
+import { BOW_RELEASE_SWEEP, profileFor } from './movesets';
 import type { CharacterId } from './roster';
 
 export type AbilityPhase = 'idle' | 'startup' | 'active' | 'recovery';
@@ -871,7 +871,7 @@ export class Player {
       this.rig.animator.play(ability.drawClip, {
         once: true,
         fade: 0.08,
-        timeScale: 2.5,
+        timeScale: ability.drawTimeScale ?? 2.5,
         clamp: true,
       });
     } else if (ability.kind === 'shadowstep') {
@@ -959,7 +959,9 @@ export class Player {
     const clipTime = this.abilityTime * ability.timeScale;
     const drawDuration = ability.drawDuration;
     const releaseTime = drawDuration + ability.releaseTime;
-    const activeEnd = drawDuration + 0.33;
+    const releaseTimeScale = ability.releaseTimeScale ?? 1.4;
+    const releaseSweep = ability.releaseSweep ?? (BOW_RELEASE_SWEEP / releaseTimeScale);
+    const activeEnd = ability.activeEnd ?? (drawDuration + releaseSweep);
     const totalDuration = ability.duration;
 
     if (clipTime >= drawDuration && !this.volleyReleaseStarted) {
@@ -967,7 +969,7 @@ export class Player {
       this.rig.animator.play(ability.releaseClip, {
         once: true,
         fade: 0.04,
-        timeScale: 1.4,
+        timeScale: releaseTimeScale,
         clamp: true,
       });
     }

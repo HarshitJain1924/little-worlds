@@ -131,6 +131,10 @@ export interface PiercingVolleyAbilityProfile {
   armored?: boolean;
   drawDuration: number;
   releaseTime: number;
+  drawTimeScale?: number;
+  releaseTimeScale?: number;
+  releaseSweep?: number;
+  activeEnd?: number;
   damage: number;
   speed: number;
   maxRange: number;
@@ -327,11 +331,15 @@ export const ROGUE_ABILITY: ShadowstepAbilityProfile = {
  * Brief draw/aim preparation (0.32s at timeScale: 2.5 on Ranged_Bow_Draw)
  * transitioning cleanly into Ranged_Bow_Release (at timeScale: 1.4).
  * String loose occurs at authored t = 0.28s, which is 0.28 / 1.4 = 0.20s into release.
- * Follow-through sweep finishes at 0.65 / 1.4 = 0.46s (total t = 0.32 + 0.46 = 0.78s),
+ * Follow-through sweep finishes at 0.65 / 1.4 = 0.464s (total activeEnd = 0.32 + 0.464 = 0.784s),
  * with recovery lasting until 0.85s (total duration 0.85s).
  */
+export const RANGER_VOLLEY_DRAW_TIME_SCALE = 2.5;
+export const RANGER_VOLLEY_RELEASE_TIME_SCALE = 1.4;
 export const RANGER_VOLLEY_DRAW_DURATION = 0.32;
-export const RANGER_VOLLEY_RELEASE_TIME = 0.20;
+export const RANGER_VOLLEY_RELEASE_TIME = +(BOW_LOOSE / RANGER_VOLLEY_RELEASE_TIME_SCALE).toFixed(2); // 0.20
+export const RANGER_VOLLEY_RELEASE_SWEEP = +(BOW_RELEASE_SWEEP / RANGER_VOLLEY_RELEASE_TIME_SCALE).toFixed(3); // 0.464
+export const RANGER_VOLLEY_ACTIVE_END = +(RANGER_VOLLEY_DRAW_DURATION + RANGER_VOLLEY_RELEASE_SWEEP).toFixed(3); // 0.784
 export const RANGER_VOLLEY_DURATION = 0.85;
 
 export const RANGER_ABILITY: PiercingVolleyAbilityProfile = {
@@ -347,6 +355,10 @@ export const RANGER_ABILITY: PiercingVolleyAbilityProfile = {
   armored: true,
   drawDuration: RANGER_VOLLEY_DRAW_DURATION,
   releaseTime: RANGER_VOLLEY_RELEASE_TIME,
+  drawTimeScale: RANGER_VOLLEY_DRAW_TIME_SCALE,
+  releaseTimeScale: RANGER_VOLLEY_RELEASE_TIME_SCALE,
+  releaseSweep: RANGER_VOLLEY_RELEASE_SWEEP,
+  activeEnd: RANGER_VOLLEY_ACTIVE_END,
   damage: 60,
   speed: 65,
   maxRange: 55,

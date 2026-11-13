@@ -7,6 +7,8 @@ import {
   profileFor,
   RANGER_VOLLEY_DRAW_DURATION,
   RANGER_VOLLEY_RELEASE_TIME,
+  RANGER_VOLLEY_RELEASE_SWEEP,
+  RANGER_VOLLEY_ACTIVE_END,
   RANGER_VOLLEY_DURATION,
   RANGER_ABILITY,
   KNIGHT_ABILITY,
@@ -16,6 +18,9 @@ import {
 import type { CameraObstacle } from '../src/play/collision.ts';
 import type { Impact, ProjectileField, ProjectileTarget } from '../src/play/projectiles.ts';
 import { ProjectilePool } from '../src/play/projectiles.ts';
+import { solveShot } from '../src/play/aim.ts';
+
+const FLAT: ProjectileField = { obstacles: [], heightAt: () => 0 };
 
 function makeRig(): {
   root: THREE.Object3D;
@@ -200,15 +205,22 @@ test('Ranger ability activation and phase progression (startup, active, recovery
   }
   assert.equal(shotsFired, 1);
 
-  // Advance to t = 0.70s (exceeds active sweep 0.65s): transitions to recovery phase
+  // Advance to t = 0.70s: still in active follow-through sweep (activeEnd = 0.784s)
   for (let i = 0; i < 9; i += 1) {
+    player.update(1 / 60, input as never, camera as never);
+  }
+  assert.equal(player.activeAbilityPhase, 'active');
+  assert.equal(shotsFired, 1);
+
+  // Advance past activeEnd (0.784s) to t = 0.816s: transitions to recovery phase
+  for (let i = 0; i < 7; i += 1) {
     player.update(1 / 60, input as never, camera as never);
   }
   assert.equal(player.activeAbilityPhase, 'recovery');
   assert.equal(shotsFired, 1);
 
   // Advance to t = 0.90s (exceeds total duration 0.85s): returns to idle
-  for (let i = 0; i < 12; i += 1) {
+  for (let i = 0; i < 6; i += 1) {
     player.update(1 / 60, input as never, camera as never);
   }
   assert.equal(player.isAbilityActive, false);
@@ -275,33 +287,33 @@ test('Hyper-armour protects active release while startup and recovery are interr
     assert.equal(rig.animator.playing, 'Hit_A');
   }
 
-  // Test 2: Hit during active phase (0.32s .. 0.65s) is resisted via hyper-armour
+  // Test 2: Hit during active phase (0.32s .. 0.784s) is resisted via hyper-armour even late in sweep (0.70s)
   {
     const { rig, player, camera, input } = createTestEnvironment('ranger');
     input.abilityEdge = true;
     player.update(1 / 60, input as never, camera as never);
 
-    // Advance to active phase (0.40s)
-    for (let i = 0; i < 24; i += 1) {
+    // Advance to late active follow-through sweep (0.70s)
+    for (let i = 0; i < 42; i += 1) {
       player.update(1 / 60, input as never, camera as never);
     }
     assert.equal(player.activeAbilityPhase, 'active');
 
-    // Take damage during active phase
+    // Take damage during active follow-through
     player.takeDamage(10, new THREE.Vector3(0, 0, -2));
     assert.equal(player.isAbilityActive, true);
     assert.equal(player.activeAbilityPhase, 'active');
     assert.notEqual(rig.animator.playing, 'Hit_A');
   }
 
-  // Test 3: Hit during recovery phase (0.65s .. 0.85s) interrupts the ability
+  // Test 3: Hit during recovery phase (0.784s .. 0.85s) interrupts the ability
   {
     const { rig, player, camera, input } = createTestEnvironment('ranger');
     input.abilityEdge = true;
     player.update(1 / 60, input as never, camera as never);
 
-    // Advance to recovery phase (0.72s)
-    for (let i = 0; i < 43; i += 1) {
+    // Advance to recovery phase (0.80s, 48 frames)
+    for (let i = 0; i < 48; i += 1) {
       player.update(1 / 60, input as never, camera as never);
     }
     assert.equal(player.activeAbilityPhase, 'recovery');
@@ -326,11 +338,19 @@ test('Dodge cancellation permitted during recovery phase', () => {
   assert.equal(player.isDodging, false);
   assert.equal(player.isAbilityActive, true);
 
-  // Advance into recovery phase (t = 0.72s)
-  for (let i = 0; i < 42; i += 1) {
+  // Advance into late active follow-through (t = 0.70s): dodge cannot cancel
+  for (let i = 0; i < 41; i += 1) {
+    player.update(1 / 60, input as never, camera as never);
+  }
+  assert.equal(player.activeAbilityPhase, 'active');
+  assert.equal(player.canStartDodge(), false);
+
+  // Advance into recovery phase (t = 0.80s, 6 more frames)
+  for (let i = 0; i < 6; i += 1) {
     player.update(1 / 60, input as never, camera as never);
   }
   assert.equal(player.activeAbilityPhase, 'recovery');
+  assert.equal(player.canStartDodge(), true);
 
   // Dodge during recovery cancels remaining end-lag immediately
   input.dodgeEdge = true;
@@ -572,4 +592,200 @@ test('Regression check: Knight, Barbarian, and Rogue signature abilities remain 
   rogueEnv.player.update(1 / 60, rogueEnv.input as never, rogueEnv.camera as never);
   assert.equal(rogueEnv.player.isAbilityActive, true);
   assert.equal(rogueEnv.player.currentAbility?.name, 'Shadowstep');
+});
+
+test('Projectile pool exhaustion and recycling for piercing arrows', () => {
+  const pool = makePool(FLAT, 2);
+  const targetA = makeTarget(0, -6);
+  const targetB = makeTarget(0, -12);
+  const impacts: Impact[] = [];
+
+  // Spawn 1st piercing arrow: travels at 20 m/s
+  pool.spawn({
+    origin: new THREE.Vector3(0, 1, 0),
+    direction: new THREE.Vector3(0, 0, -1),
+    speed: 20,
+    damage: 60,
+    maxRange: 55,
+    kind: 'piercingArrow',
+    piercing: true,
+  });
+
+  // Advance time so slot 0 hits targetA and travels past to z = -10
+  pool.update(0.5, [targetA, targetB], collect(impacts));
+  assert.equal(targetA.hits, 1);
+  assert.equal(pool.activeCount, 1);
+
+  // Spawn 2nd piercing arrow: pool is now completely full (2/2 active slots)
+  pool.spawn({
+    origin: new THREE.Vector3(0, 1, 0),
+    direction: new THREE.Vector3(0, 0, -1),
+    speed: 10,
+    damage: 60,
+    maxRange: 55,
+    kind: 'piercingArrow',
+    piercing: true,
+  });
+  assert.equal(pool.activeCount, 2);
+
+  // Step simulation: slot 0 has travelled 15m, slot 1 has travelled 5m
+  pool.update(0.25, [targetA, targetB], collect(impacts));
+
+  const slots = (pool as unknown as {
+    arrows: {
+      meshes: Map<string, THREE.Mesh>;
+      activeMesh: THREE.Mesh | null;
+      hitTargets: Set<unknown>;
+      kind: string;
+      travelled: number;
+    }[];
+  }).arrows;
+
+  assert.equal(slots[0].activeMesh, slots[0].meshes.get('piercingArrow'));
+  assert.equal(slots[0].meshes.get('piercingArrow')!.visible, true);
+  assert.equal(slots[0].hitTargets.has(targetA), true);
+
+  // Spawn 3rd projectile with kind 'piercingArrow' when pool is full.
+  // Must recycle farthest active slot (slot 0).
+  const spawned = pool.spawn({
+    origin: new THREE.Vector3(0, 1, 0),
+    direction: new THREE.Vector3(0, 0, -1),
+    speed: 30,
+    damage: 60,
+    maxRange: 55,
+    kind: 'piercingArrow',
+    piercing: true,
+  });
+  assert.equal(spawned, true, 'pool recycling succeeds when exhausted');
+  assert.equal(pool.activeCount, 2, 'active count remains at capacity');
+
+  // Verify that slot 0's hitTargets was cleared on recycling so it doesn't remember old hits
+  assert.equal(slots[0].hitTargets.size, 0, 'recycled slot clears previous hitTargets');
+  assert.equal(slots[0].travelled, 0, 'recycled slot resets travelled distance');
+
+  // Next update: the recycled arrow flies toward targetA and damages it again!
+  pool.update(0.3, [targetA, targetB], collect(impacts));
+  assert.equal(targetA.hits, 2, 'recycled slot successfully hits targetA without being suppressed');
+
+  // Now test cross-kind recycling when exhausted: spawn a normal 'arrow' in slot 0 or 1
+  pool.spawn({
+    origin: new THREE.Vector3(0, 1, 0),
+    direction: new THREE.Vector3(0, 0, -1),
+    speed: 34,
+    damage: 18,
+    maxRange: 40,
+    kind: 'arrow',
+  });
+
+  // Verify that the recycled slot hides the piercingArrow mesh and shows the normal arrow mesh
+  const recycled = slots.find((s) => s.kind === 'arrow');
+  assert.ok(recycled, 'slot converted to normal arrow');
+  assert.equal(recycled.meshes.get('piercingArrow')!.visible, false, 'piercing mesh hidden');
+  assert.equal(recycled.meshes.get('arrow')!.visible, true, 'normal arrow mesh visible');
+});
+
+test('Piercing Volley aim solution: camera crosshair, muzzle offset, and target lock alignment', () => {
+  // Test 1: Ranger aim facing during draw preparation tracks camera aim
+  {
+    const { player, input } = createTestEnvironment('ranger');
+    const cameraLook = new THREE.Vector3(1, 0, 0); // camera looking East (+X)
+    const camera = { forward: (out: THREE.Vector3) => out.copy(cameraLook) };
+
+    input.abilityEdge = true;
+    player.update(1 / 60, input as never, camera as never);
+
+    // Initial facing should align with camera forward (+X, yaw = Math.PI / 2)
+    assert.ok(Math.abs(player.yaw - Math.PI / 2) < 0.1, `yaw was ${player.yaw}`);
+
+    // Camera shifts to look North-East
+    const newCameraLook = new THREE.Vector3(1, 0, -1).normalize();
+    const cameraNE = { forward: (out: THREE.Vector3) => out.copy(newCameraLook) };
+    const targetYaw = Math.atan2(newCameraLook.x, newCameraLook.z);
+
+    // During draw preparation, updateLocomotion turns toward camera aim
+    for (let i = 0; i < 15; i += 1) {
+      player.update(1 / 60, input as never, cameraNE as never);
+    }
+    assert.ok(
+      Math.abs(player.yaw - targetYaw) < 0.15,
+      `yaw ${player.yaw} tracked camera target ${targetYaw}`,
+    );
+  }
+
+  // Test 2: Locked-on target aim direction
+  {
+    const target = makeTarget(5, -10, 0);
+    const muzzle = new THREE.Vector3(0, 1.4, 0);
+    const chestTarget = new THREE.Vector3(target.position.x, target.position.y + 1.05, target.position.z);
+    const toTarget = chestTarget.clone().sub(muzzle).normalize();
+    const aimPoint = new THREE.Vector3();
+
+    const solution = solveShot(muzzle, toTarget, FLAT, [target], RANGER_ABILITY.maxRange, aimPoint);
+    assert.equal(solution.kind, 'enemy');
+    assert.equal(solution.target, target);
+    assert.ok(solution.distance < 12);
+    assert.ok(aimPoint.distanceTo(chestTarget) < 0.65, 'aimPoint lands on outer cylinder entry surface');
+  }
+
+  // Test 3: Free-aim third-person shoulder camera parallax convergence
+  {
+    const wall: CameraObstacle = {
+      kind: 'box',
+      minX: -10,
+      maxX: 10,
+      minY: 0,
+      maxY: 6,
+      minZ: -21,
+      maxZ: -19,
+    };
+    const worldWithWall: ProjectileField = { obstacles: [wall], heightAt: () => 0 };
+
+    // Camera at right shoulder, looking forward at wall
+    const cameraPos = new THREE.Vector3(1.2, 1.8, 4.0);
+    const aimCamera = new THREE.Vector3(0, 0, -1);
+    const playerPos = new THREE.Vector3(0, 0, 0);
+    const muzzle = new THREE.Vector3(-0.25, 1.35, 0); // left bow hand
+    const maxRange = RANGER_ABILITY.maxRange;
+
+    // Ray from player depth along camera sightline (mimics solvePlayerAim in main.ts)
+    const depth =
+      (playerPos.x - cameraPos.x) * aimCamera.x +
+      (playerPos.y + 1.45 - cameraPos.y) * aimCamera.y +
+      (playerPos.z - cameraPos.z) * aimCamera.z;
+    const cameraRay = cameraPos.clone().addScaledVector(aimCamera, Math.max(0, depth));
+
+    const aimReference = new THREE.Vector3();
+    const camSolution = solveShot(cameraRay, aimCamera, worldWithWall, [], maxRange, aimReference);
+    assert.equal(camSolution.kind, 'obstacle');
+    assert.ok(Math.abs(aimReference.z + 19) < 0.05);
+
+    // Muzzle shot direction converges on the crosshair impact point
+    const shotDirection = aimReference.clone().sub(muzzle).normalize();
+    const shotOrigin = muzzle.clone().addScaledVector(shotDirection, 0.4);
+    const shotHit = new THREE.Vector3();
+    const shotSolution = solveShot(shotOrigin, shotDirection, worldWithWall, [], maxRange, shotHit);
+
+    assert.equal(shotSolution.kind, 'obstacle');
+    assert.ok(Math.abs(shotHit.x - aimReference.x) < 1e-3, 'shot converges on crosshair X');
+    assert.ok(Math.abs(shotHit.y - aimReference.y) < 1e-3, 'shot converges on crosshair Y');
+    assert.ok(Math.abs(shotHit.z - aimReference.z) < 1e-3, 'shot converges on crosshair Z');
+
+    // Spawn piercing arrow along this resolved direction and verify it hits the wall
+    const pool = makePool(worldWithWall);
+    const impacts: Impact[] = [];
+    pool.spawn({
+      origin: shotOrigin,
+      direction: shotDirection,
+      speed: RANGER_ABILITY.speed,
+      damage: RANGER_ABILITY.damage,
+      maxRange: RANGER_ABILITY.maxRange,
+      kind: 'piercingArrow',
+      piercing: true,
+    });
+
+    pool.update(0.4, [], collect(impacts));
+    assert.equal(impacts.length, 1);
+    assert.equal(impacts[0].kind, 'obstacle');
+    assert.ok(Math.abs(impacts[0].position.z + 19) < 0.1);
+  }
 });
