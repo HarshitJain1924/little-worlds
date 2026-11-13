@@ -233,3 +233,68 @@ test('aim preview chooses the same nearest feature as projectile collision', () 
   assert.equal(clearShot.target, target);
   assert.ok(clearShot.distance < 8, 'the body is selected before the range limit');
 });
+
+test('projectile pool cross-kind recycling hides previous mesh when slot is reused', () => {
+  const scene = new THREE.Scene();
+  const pool = new ProjectilePool(
+    scene,
+    FLAT,
+    {
+      arrow: { geometry: new THREE.BoxGeometry(0.1, 0.1, 1), material: new THREE.MeshBasicMaterial() },
+      magicLight: { geometry: new THREE.SphereGeometry(0.2), material: new THREE.MeshBasicMaterial() },
+      magicHeavy: { geometry: new THREE.SphereGeometry(0.4), material: new THREE.MeshBasicMaterial() },
+    },
+    2, // small capacity of 2 slots
+  );
+
+  // Slot 0: spawn arrow
+  pool.spawn({
+    origin: new THREE.Vector3(0, 1, 0),
+    direction: new THREE.Vector3(0, 0, -1),
+    speed: 20,
+    damage: 18,
+    maxRange: 40,
+    kind: 'arrow',
+  });
+
+  // Slot 1: spawn arrow
+  pool.spawn({
+    origin: new THREE.Vector3(1, 1, 0),
+    direction: new THREE.Vector3(0, 0, -1),
+    speed: 20,
+    damage: 18,
+    maxRange: 40,
+    kind: 'arrow',
+  });
+
+  // Advance time so slot 0 has travelled 10m, slot 1 has travelled 5m
+  pool.update(0.5, [], () => {});
+
+  const slots = (pool as unknown as { arrows: { meshes: Map<string, THREE.Mesh>; activeMesh: THREE.Mesh | null }[] }).arrows;
+  assert.equal(slots[0].meshes.get('arrow')!.visible, true);
+  assert.equal(slots[0].meshes.get('magicLight')!.visible, false);
+
+  // Now spawn a 3rd projectile with kind: 'magicLight'.
+  // Capacity is 2, so this must recycle the farthest active slot (slot 0).
+  pool.spawn({
+    origin: new THREE.Vector3(0, 1, 0),
+    direction: new THREE.Vector3(0, 0, -1),
+    speed: 30,
+    damage: 16,
+    maxRange: 40,
+    kind: 'magicLight',
+  });
+
+  // Verify that slot 0's arrow mesh is now HIDDEN, and only its magicLight mesh is visible!
+  assert.equal(slots[0].meshes.get('arrow')!.visible, false, 'previous arrow mesh must be hidden');
+  assert.equal(slots[0].meshes.get('magicLight')!.visible, true, 'recycled magicLight mesh must be visible');
+  assert.equal(slots[0].meshes.get('magicHeavy')!.visible, false, 'unused magicHeavy mesh must remain hidden');
+
+  // Now clear the pool: all meshes in all slots must be hidden
+  pool.clear();
+  for (const slot of slots) {
+    for (const mesh of slot.meshes.values()) {
+      assert.equal(mesh.visible, false, 'all meshes must be hidden on retirement/clear');
+    }
+  }
+});

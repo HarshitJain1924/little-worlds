@@ -173,6 +173,12 @@ export class ProjectilePool {
     const arrow = this.arrows.find((entry) => !entry.active) ?? this.farthest();
     if (!arrow) return false;
 
+    // When recycling an active slot (or changing kinds), ensure all previous meshes are hidden
+    for (const mesh of arrow.meshes.values()) {
+      mesh.visible = false;
+    }
+    arrow.activeMesh = null;
+
     const kind = shot.kind ?? 'arrow';
     arrow.kind = kind;
     arrow.active = true;
@@ -326,10 +332,10 @@ export class ProjectilePool {
 
   private retire(arrow: Arrow): void {
     arrow.active = false;
-    if (arrow.activeMesh) {
-      arrow.activeMesh.visible = false;
-      arrow.activeMesh = null;
+    for (const mesh of arrow.meshes.values()) {
+      mesh.visible = false;
     }
+    arrow.activeMesh = null;
   }
 
   private farthest(): Arrow | undefined {

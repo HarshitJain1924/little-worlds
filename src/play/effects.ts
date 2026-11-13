@@ -97,8 +97,13 @@ export class CombatEffects {
     }
   }
 
-  /** Impact ripple at roughly chest height. */
-  spawn(position: { x: number; y: number; z: number }, kind: ImpactKind = 'hit'): void {
+  /**
+   * Impact ripple.
+   * @param lift When true (default), offsets Y by +1.15 so passing an entity's
+   * base position (e.g. enemy.position) centers the ripple on the chest.
+   * When false, places the burst exactly at `position` without vertical offset.
+   */
+  spawn(position: { x: number; y: number; z: number }, kind: ImpactKind = 'hit', lift = true): void {
     const burst = this.bursts[this.cursor % this.bursts.length];
     this.cursor += 1;
 
@@ -110,7 +115,7 @@ export class CombatEffects {
     burst.baseOpacity = kind === 'block' ? 0.7 : isHeavy ? 0.95 : 0.8;
     burst.material.color.setHex(COLORS[kind]);
     burst.material.opacity = burst.baseOpacity;
-    burst.mesh.position.set(position.x, position.y + 1.15, position.z);
+    burst.mesh.position.set(position.x, position.y + (lift ? 1.15 : 0), position.z);
     burst.mesh.scale.setScalar(burst.startScale);
     burst.mesh.visible = true;
     burst.active = true;

@@ -7,6 +7,7 @@ import { ProjectilePool } from '../src/play/projectiles.ts';
 import type { Impact, ProjectileField, ProjectileTarget } from '../src/play/projectiles.ts';
 import { solveShot } from '../src/play/aim.ts';
 import type { CameraObstacle } from '../src/play/collision.ts';
+import { CombatEffects } from '../src/play/effects.ts';
 
 function makeRig(): {
   root: THREE.Object3D;
@@ -503,4 +504,73 @@ test('Camera crosshair sightline and projectile trajectory converge on the aimed
   assert.ok(Math.abs(shotHit.x - aimReference.x) < 1e-3, 'projectile aligns with crosshair X');
   assert.ok(Math.abs(shotHit.y - aimReference.y) < 1e-3, 'projectile aligns with crosshair Y');
   assert.ok(Math.abs(shotHit.z - aimReference.z) < 1e-3, 'projectile aligns with crosshair Z');
+});
+
+test('aim solution accuracy: muzzle trajectory miss returns range even if camera ray found enemy', () => {
+  // Target is at (1.35, 0, -10)
+  const target = makeTarget(1.35, -10, 0);
+
+  // Muzzle is at (-0.36, 1.16, 0)
+  const muzzle = new THREE.Vector3(-0.36, 1.16, 0);
+  const shotOrigin = muzzle.clone();
+  const aimPoint = new THREE.Vector3();
+
+  // If the muzzle trajectory points away from the target (or misses the cylinder entirely):
+  const missDirection = new THREE.Vector3(1, 0, 0).normalize();
+  const shotSolution = solveShot(shotOrigin, missDirection, FLAT, [target], 40, aimPoint);
+
+  assert.equal(shotSolution.kind, 'range', 'actual projectile path missing target returns range');
+  assert.equal(shotSolution.target, null);
+});
+
+test('aim solution accuracy: obstacle blocking the muzzle trajectory returns obstacle', () => {
+  const target = makeTarget(0, -10, 0);
+  const wallBetween: CameraObstacle = {
+    kind: 'box',
+    minX: -2,
+    maxX: 2,
+    minZ: -5,
+    maxZ: -4,
+    bottom: 0,
+    top: 4,
+  };
+  const worldWithWall: ProjectileField = { obstacles: [wallBetween], heightAt: () => 0 };
+
+  const shotOrigin = new THREE.Vector3(0, 1.2, 0);
+  const toTarget = new THREE.Vector3(0, 1.05, -10).sub(shotOrigin).normalize();
+  const aimPoint = new THREE.Vector3();
+
+  // Projectile from muzzle hits the wall before reaching the target
+  const shotSolution = solveShot(shotOrigin, toTarget, worldWithWall, [target], 40, aimPoint);
+  assert.equal(shotSolution.kind, 'obstacle', 'blocked shot trajectory reports obstacle');
+  assert.equal(shotSolution.target, null);
+  assert.ok(aimPoint.z >= -5.01 && aimPoint.z <= -3.95);
+
+  // Existing Ranger behavior: clear shot returns enemy
+  const rangerOrigin = new THREE.Vector3(0, 1.35, 0);
+  const rangerToTarget = new THREE.Vector3(0, 1.05, -10).sub(rangerOrigin).normalize();
+  const rangerClearSolution = solveShot(rangerOrigin, rangerToTarget, FLAT, [target], 40, aimPoint);
+  assert.equal(rangerClearSolution.kind, 'enemy', 'clear shot preserves enemy detection');
+  assert.equal(rangerClearSolution.target, target);
+});
+
+test('CombatEffects positioning: enemy hits lift to chest height while grounded/exact hits stay at position', () => {
+  const scene = new THREE.Scene();
+  const effects = new CombatEffects(scene);
+
+  const enemyGroundPos = { x: 5, y: 0, z: -10 };
+  effects.spawn(enemyGroundPos, 'hit', true);
+
+  const bursts = (effects as unknown as { bursts: { mesh: THREE.Mesh; active: boolean }[] }).bursts;
+  const enemyBurst = bursts.find((b) => b.active);
+  assert.ok(enemyBurst, 'burst must be active');
+  assert.equal(enemyBurst.mesh.position.y, 1.15, 'enemy body hit lifts to chest height (+1.15)');
+
+  // Direct grounded/exact position (e.g. cast origin at crystal tip or grounded obstacle impact)
+  const exactPos = { x: 0, y: 1.82, z: 0 };
+  effects.spawn(exactPos, 'magic', false);
+
+  const exactBurst = bursts.find((b) => b.active && b !== enemyBurst);
+  assert.ok(exactBurst, 'exact burst must be active');
+  assert.equal(exactBurst.mesh.position.y, 1.82, 'exact placement preserves y coordinate without +1.15 offset');
 });

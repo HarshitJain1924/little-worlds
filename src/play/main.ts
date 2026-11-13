@@ -353,17 +353,11 @@ async function boot(): Promise<void> {
     const clearance = activeCharacter === 'mage' ? 0.1 : 0.4;
     shotOrigin.copy(muzzle).addScaledVector(shotDirection, clearance);
 
-    // Solve from the projectile's actual origin. If cover/wall blocks the muzzle,
-    // the shot stops at the obstruction and reports 'obstacle'.
+    // Solve from the projectile's actual origin. The returned aim state honestly
+    // represents the actual projectile path and its collision result (never reporting
+    // 'enemy' if the actual muzzle shot misses, is blocked by cover, or returns 'range').
     const shotSolution = solveShot(shotOrigin, shotDirection, world, enemies, maxRange, aimPoint);
-
-    if (aimSolution.kind === 'enemy' && shotSolution.kind === 'enemy') {
-      return shotSolution;
-    }
-    if (shotSolution.kind === 'obstacle') {
-      return shotSolution;
-    }
-    return shotSolution.kind !== 'range' ? shotSolution : aimSolution;
+    return shotSolution;
   }
 
   player.onRangedShot = (attack) => {
@@ -387,7 +381,7 @@ async function boot(): Promise<void> {
     });
 
     if (isMage) {
-      effects.spawn(shotOrigin, heavy ? 'magicHeavy' : 'magic');
+      effects.spawn(shotOrigin, heavy ? 'magicHeavy' : 'magic', false);
       sfx.magicCast(heavy);
       cameraRig.shake(heavy ? 0.08 : 0.04);
     } else {
@@ -550,9 +544,10 @@ async function boot(): Promise<void> {
       return;
     }
 
-    // Wall, pillar, trunk or ground: the projectile stops there.
+    // Wall, pillar, trunk or ground: the projectile stops there. Only the flipbook
+    // spark is used, because the ring pool sits at chest height and would float
+    // above a ground or low obstacle strike.
     if (isMagic) {
-      effects.spawn(impact.position, isHeavy ? 'magicHeavy' : 'magic');
       vfx.spawn(isHeavy ? 'impactHeavy' : 'impact', impact.position, player.yaw);
       sfx.magicHit(isHeavy);
     } else {
@@ -761,7 +756,10 @@ async function boot(): Promise<void> {
 
     hud.setTarget(tracker.locked ?? tracker.soft, tracker.isLocked);
 
-    if (player.isAiming && player.profile.aim?.clip) {
+    const showAim =
+      (player.isAiming && player.profile.aim?.clip) ||
+      (player.isCharging && activeCharacter === 'mage');
+    if (showAim) {
       const ranged = player.isCharging ? player.profile.heavy.ranged : player.profile.light.ranged;
       const solution = solvePlayerAim(ranged?.maxRange ?? 55);
       // The visible reticle is deliberately screen-centred, like a normal
