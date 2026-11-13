@@ -912,6 +912,19 @@ export class Player {
     const maxVertical = ability.maxVerticalOffset ?? 1.5;
     const radiusSq = ability.radius * ability.radius;
 
+    const clipTime = this.abilityTime * ability.timeScale;
+    const hitStart = ability.hitStart;
+    const hitEnd = ability.hitEnd;
+    const span = Math.max(0.0001, hitEnd - hitStart);
+    const progress = Math.min(1.0, Math.max(0.0, (clipTime - hitStart) / span));
+
+    // Authored root rotation at hitStart (0.10s) is -53.5 deg (-0.9337 rad).
+    // The spin rotates clockwise (decreasing yaw), sweeping 360 degrees (2*PI rad) across [hitStart, hitEnd].
+    const startAngle = ability.startAngle ?? -0.9337;
+    const arcHalf = (ability.bladeArc ?? 1.22) * 0.5;
+    const TWO_PI = Math.PI * 2;
+    const maxSwept = TWO_PI * progress + arcHalf;
+
     for (const candidate of candidates) {
       if (!candidate || typeof candidate !== 'object') continue;
       if (this.abilityHitTargets.has(candidate)) continue;
@@ -927,6 +940,15 @@ export class Player {
       const dz = enemyObj.position.z - this.position.z;
       const distSq = dx * dx + dz * dz;
       if (distSq > radiusSq) continue;
+
+      // Angular check: the axe sweeps clockwise from startAngle relative to the player's base yaw
+      const enemyAngle = Math.atan2(dx, dz);
+      const relativeAngle = enemyAngle - this.yaw;
+      const angleFromStart = ((startAngle - relativeAngle) % TWO_PI + TWO_PI) % TWO_PI;
+
+      const inSweep =
+        angleFromStart <= maxSwept || (progress < 0.15 && angleFromStart >= TWO_PI - arcHalf);
+      if (!inSweep) continue;
 
       // Obstacle line-of-sight check: do not hit through walls or solid obstacles
       const clear =

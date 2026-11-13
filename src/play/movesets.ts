@@ -90,6 +90,10 @@ export interface WhirlwindAbilityProfile {
   radius: number;
   maxVerticalOffset?: number;
   moveScale?: number;
+  /** Starting relative angle of the weapon sweep at hitStart (radians). Defaults to -0.9337 (~-53.5 deg). */
+  startAngle?: number;
+  /** Effective angular hit width of the spinning blade (radians). Defaults to 1.22 (~70 deg). */
+  bladeArc?: number;
 }
 
 export type AbilityProfile = CounterAbilityProfile | WhirlwindAbilityProfile;
@@ -229,6 +233,8 @@ export const BARBARIAN_ABILITY: WhirlwindAbilityProfile = {
   radius: 2.8,
   maxVerticalOffset: 1.5,
   moveScale: 0.35,
+  startAngle: -0.9337,
+  bladeArc: 1.22,
 };
 
 export const PROFILES: Record<CombatProfileId, CombatProfile> = {

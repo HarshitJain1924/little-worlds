@@ -233,6 +233,69 @@ test('360-degree radial detection strikes enemies in front, behind, left, and ri
   assert.ok(hitResults.includes(rightEnemy), 'Right enemy hit');
 });
 
+test('Whirlwind hit detection follows the axe rotation progressively over time, rather than hitting all enemies on the first frame', () => {
+  const { player, camera, input } = createTestEnvironment('barbarian');
+
+  // Facing -Z (yaw = PI):
+  // Left is +X, Back is +Z, Right is -X, Front is -Z
+  const enemyLeft = { id: 'left', alive: true, position: new THREE.Vector3(2.0, 0, 0) };
+  const enemyBack = { id: 'back', alive: true, position: new THREE.Vector3(0, 0, 2.0) };
+  const enemyRight = { id: 'right', alive: true, position: new THREE.Vector3(-2.0, 0, 0) };
+  const enemyFront = { id: 'front', alive: true, position: new THREE.Vector3(0, 0, -2.0) };
+
+  const enemies = [enemyLeft, enemyBack, enemyRight, enemyFront];
+  player.findAreaTargets = () => enemies;
+
+  const hitOrder: { id: string; frame: number }[] = [];
+  player.onAbilityHit = (target) => {
+    hitOrder.push({ id: (target as { id: string }).id, frame: currentFrame });
+  };
+
+  let currentFrame = 0;
+  input.abilityEdge = true;
+  player.update(1 / 60, input as never, camera as never); // Frame 0: activation
+
+  // Step through frames 1 to 32 (~0.53s)
+  for (let f = 1; f <= 32; f += 1) {
+    currentFrame = f;
+    player.update(1 / 60, input as never, camera as never);
+  }
+
+  // 1. All 4 enemies must be hit
+  assert.equal(hitOrder.length, 4, 'All 4 enemies in the 360 circle must be hit');
+
+  // 2. Hits must occur at distinctly different frames, proving progressive sweep rather than instant AoE
+  const leftHit = hitOrder.find((h) => h.id === 'left')!;
+  const backHit = hitOrder.find((h) => h.id === 'back')!;
+  const rightHit = hitOrder.find((h) => h.id === 'right')!;
+  const frontHit = hitOrder.find((h) => h.id === 'front')!;
+
+  assert.ok(leftHit, 'Left enemy was hit');
+  assert.ok(backHit, 'Back enemy was hit');
+  assert.ok(rightHit, 'Right enemy was hit');
+  assert.ok(frontHit, 'Front enemy was hit');
+
+  // Verify the progressive sequential order matching axe rotation
+  assert.ok(
+    leftHit.frame < backHit.frame,
+    `Left enemy (frame ${leftHit.frame}) must be hit before Back enemy (frame ${backHit.frame})`,
+  );
+  assert.ok(
+    backHit.frame < rightHit.frame,
+    `Back enemy (frame ${backHit.frame}) must be hit before Right enemy (frame ${rightHit.frame})`,
+  );
+  assert.ok(
+    rightHit.frame < frontHit.frame,
+    `Right enemy (frame ${rightHit.frame}) must be hit before Front enemy (frame ${frontHit.frame})`,
+  );
+
+  // Proves that at early spin (e.g. frame 8), opposite side enemies (back, right, front) were not yet hit
+  assert.ok(leftHit.frame <= 8, 'Left enemy is reached early in the rotation');
+  assert.ok(backHit.frame > 8, 'Back enemy is not hit on the first active frames');
+  assert.ok(rightHit.frame > 14, 'Right enemy is not reached until mid-spin');
+  assert.ok(frontHit.frame > 20, 'Front enemy is reached as the spin completes');
+});
+
 test('Multiple enemies hit in one activation and no duplicate damage across frames', () => {
   const { player, camera, input } = createTestEnvironment('barbarian');
 
