@@ -28,7 +28,7 @@ export class InputController {
   readonly touchCapable = window.matchMedia('(pointer: coarse)').matches;
 
   /** Direct state injection for scripted verification; unused by real input. */
-  readonly virtual = { x: 0, y: 0, run: false, block: false };
+  readonly virtual = { x: 0, y: 0, run: false, block: false, heavy: false };
 
   /** Fired whenever pointer capture starts or stops. */
   onPointerLockChange: ((locked: boolean) => void) | null = null;
@@ -41,6 +41,8 @@ export class InputController {
   private lockToggleQueued = false;
   private lockNextQueued = false;
   private mouseBlock = false;
+  /** Heavy touch button currently held (charge), separate from the press edge. */
+  private touchHeavy = false;
   private lookX = 0;
   private lookY = 0;
   private zoomQueued = 0;
@@ -60,17 +62,28 @@ export class InputController {
   private readonly touches = new Map<number, { x: number; y: number }>();
   private pinchDistance = 0;
 
+  /** Fields are assigned explicitly (not parameter properties) so the class can
+   * be driven by the node test harness with a stub DOM. */
+  private readonly canvas: HTMLCanvasElement;
+  private readonly attackButton: HTMLButtonElement | null;
+  private readonly stickElement: HTMLElement | null;
+  private readonly lockButton: HTMLButtonElement | null;
+
   constructor(
-    private readonly canvas: HTMLCanvasElement,
-    private readonly attackButton: HTMLButtonElement | null,
-    private readonly stickElement: HTMLElement | null,
-    private readonly lockButton: HTMLButtonElement | null = null,
+    canvas: HTMLCanvasElement,
+    attackButton: HTMLButtonElement | null,
+    stickElement: HTMLElement | null,
+    lockButton: HTMLButtonElement | null = null,
     combatButtons: {
       heavy?: HTMLButtonElement | null;
       block?: HTMLButtonElement | null;
       dodge?: HTMLButtonElement | null;
     } = {},
   ) {
+    this.canvas = canvas;
+    this.attackButton = attackButton;
+    this.stickElement = stickElement;
+    this.lockButton = lockButton;
     this.lockSupported = typeof canvas.requestPointerLock === 'function';
 
     window.addEventListener('keydown', this.onKeyDown);
@@ -97,10 +110,28 @@ export class InputController {
       this.lockToggleQueued = true;
     });
 
-    combatButtons.heavy?.addEventListener('pointerdown', (event) => {
-      event.preventDefault();
-      this.heavyQueued = true;
-    });
+    const heavyButton = combatButtons.heavy;
+    if (heavyButton) {
+      heavyButton.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        this.touchHeavy = true;
+        this.heavyQueued = true;
+        // Hold-to-charge must survive the finger sliding off the button.
+        try {
+          heavyButton.setPointerCapture(event.pointerId);
+        } catch {
+          // Synthetic or rejected capture: the release listeners still run.
+        }
+      });
+
+      const release = (): void => {
+        this.touchHeavy = false;
+      };
+      heavyButton.addEventListener('pointerup', release);
+      heavyButton.addEventListener('pointercancel', release);
+      heavyButton.addEventListener('lostpointercapture', release);
+      heavyButton.addEventListener('contextmenu', (event) => event.preventDefault());
+    }
 
     combatButtons.dodge?.addEventListener('pointerdown', (event) => {
       event.preventDefault();
@@ -241,6 +272,14 @@ export class InputController {
     return this.held.has('f') || this.mouseBlock || this.touchBlock || this.virtual.block;
   }
 
+  /**
+   * True while the heavy input is *held*, which is what a charge reads. The
+   * press edge above starts the charge; this decides when it ends.
+   */
+  isHeavyHeld(): boolean {
+    return this.held.has('k') || this.touchHeavy || this.virtual.heavy;
+  }
+
   private readonly onKeyDown = (event: KeyboardEvent): void => {
     const key = event.key.toLowerCase();
 
@@ -270,6 +309,7 @@ export class InputController {
     this.held.clear();
     this.mouseBlock = false;
     this.touchBlock = false;
+    this.touchHeavy = false;
     this.tapCandidate = null;
     this.stickId = null;
     this.lookId = null;
@@ -322,10 +362,34 @@ export class InputController {
 
     if (event.button === 2) {
       this.mouseBlock = true;
+      // Drag-look fallback: without pointer lock the right button must also
+      // steer the camera, or holding aim would freeze the view entirely.
+      if (this.lookId === null) {
+        this.lookId = event.pointerId;
+        this.lookLast.x = event.clientX;
+        this.lookLast.y = event.clientY;
+        try {
+          this.canvas.setPointerCapture(event.pointerId);
+        } catch {
+          // Synthetic pointer events reject capture; dragging still works.
+        }
+      }
+      // RMB is the aim gesture on desktop. Capture it immediately so aiming
+      // also enables unrestricted mouse look instead of leaving the capture
+      // prompt over the combat view.
+      if (this.lockSupported && !this.lockDenied) this.requestLock();
       return;
     }
 
     if (event.button !== 0) return;
+
+    // While RMB aim is held in drag-look fallback, fire on the press edge.
+    // Waiting for pointer-up races pointer-lock acquisition, which used to
+    // discard the tap and made left click appear dead while aiming.
+    if (this.mouseBlock || this.held.has('f')) {
+      this.attackQueued = true;
+      return;
+    }
 
     // Track the drag unconditionally: if pointer lock is unavailable or the
     // request is denied, look control must still work immediately.
@@ -429,6 +493,7 @@ export class InputController {
 
     if (event.button === 2) {
       this.mouseBlock = false;
+      if (event.pointerId === this.lookId) this.lookId = null;
       return;
     }
 

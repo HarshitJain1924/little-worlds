@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import type { CameraObstacle } from '../src/play/collision.ts';
 import type { Impact, ProjectileField, ProjectileTarget } from '../src/play/projectiles.ts';
 import { ProjectilePool } from '../src/play/projectiles.ts';
+import { solveShot } from '../src/play/aim.ts';
 
 const FLAT: ProjectileField = { obstacles: [], heightAt: () => 0 };
 
@@ -207,4 +208,28 @@ test('dead bodies are not hit and a suppressed hit is reported as no damage', ()
 
   assert.equal(dead.hits, 0);
   assert.equal(impacts.filter((impact) => impact.kind === 'target').length, 0);
+});
+
+test('aim preview chooses the same nearest feature as projectile collision', () => {
+  const wall: CameraObstacle = {
+    kind: 'box', minX: -2, maxX: 2, minZ: -4, maxZ: -3, bottom: 0, top: 3,
+  };
+  const field: ProjectileField = { obstacles: [wall], heightAt: () => 0 };
+  const target = makeTarget(0, -8, 0);
+  const point = new THREE.Vector3();
+
+  const wallShot = solveShot(
+    new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, -1), field, [target], 20, point,
+  );
+  assert.equal(wallShot.kind, 'obstacle');
+  assert.equal(wallShot.target, null);
+  assert.ok(point.z > -3.1 && point.z < -2.9);
+
+  const clearPoint = new THREE.Vector3();
+  const clearShot = solveShot(
+    new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, -1), FLAT, [target], 20, clearPoint,
+  );
+  assert.equal(clearShot.kind, 'enemy');
+  assert.equal(clearShot.target, target);
+  assert.ok(clearShot.distance < 8, 'the body is selected before the range limit');
 });

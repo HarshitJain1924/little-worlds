@@ -7,7 +7,7 @@ import type { InputController } from './input';
 import { resolveBlockers } from './collision';
 import type { World } from './world';
 import { ARENA } from './world';
-import type { CombatProfile } from './movesets';
+import type { ChargeProfile, CombatProfile } from './movesets';
 import { profileFor } from './movesets';
 
 /**
@@ -47,6 +47,11 @@ export interface AttackProfile {
     /** Maximum flight distance. */
     maxRange: number;
   };
+  /**
+   * Input slot this attack came from. A charged shot is derived from the heavy
+   * profile at release, so callers cannot compare by object identity.
+   */
+  tag?: 'light' | 'heavy';
 }
 
 const DODGE = {
@@ -147,20 +152,30 @@ export class Player {
   private queuedAttack: AttackProfile | null = null;
   /** Alternates the Rogue's stab and slice; unused by single-clip profiles. */
   private lightFlip = false;
+  /** Heavy input is being held to charge a shot. */
+  private charging = false;
+  private chargeTime = 0;
+  /** Reused so a charged shot does not build a new profile object per release. */
+  private chargeAttack: AttackProfile | null = null;
   private dodgeClip: string | null = null;
   private dodgeMotion: DodgeMotion | null = null;
   private invulnerable = 0;
   private lockTarget: { x: number; z: number } | null = null;
   private handSlot: THREE.Object3D | null | undefined;
 
+  /** Assigned explicitly rather than as a parameter property, so the node test
+   * harness can drive the controller with a stub world and rig. */
+  private readonly world: World;
+
   constructor(
     rig: CharacterRig,
-    private readonly world: World,
+    world: World,
     spawn: { x: number; z: number } = ARENA.spawn,
     profile: CombatProfile = profileFor('knight'),
   ) {
     this.rig = rig;
     this.profile = profile;
+    this.world = world;
     this.position.set(spawn.x, world.heightAt(spawn.x, spawn.z), spawn.z);
     this.rig.root.position.copy(this.position);
     this.rig.root.rotation.y = this.yaw;
@@ -177,6 +192,26 @@ export class Player {
   /** True while the aim stance is held (Ranger: the defence input draws the bow). */
   get isAiming(): boolean {
     return this.aiming;
+  }
+
+  /** True between pressing and releasing the heavy input, on a charge profile. */
+  get isCharging(): boolean {
+    return this.charging;
+  }
+
+  /** 0..1 of the authored charge window, for the HUD. */
+  get chargeProgress(): number {
+    const charge = this.profile.charge;
+    if (!charge || !this.charging) return 0;
+    return clamp(this.chargeTime / charge.maxTime, 0, 1);
+  }
+
+  /** 0..1 of the *bonus* window: 0 until `minTime`, 1 at `maxTime`. */
+  get chargePower(): number {
+    const charge = this.profile.charge;
+    if (!charge) return 0;
+    const span = Math.max(0.0001, charge.maxTime - charge.minTime);
+    return clamp((this.chargeTime - charge.minTime) / span, 0, 1);
   }
 
   get isDodging(): boolean {
@@ -240,6 +275,10 @@ export class Player {
     this.lightFlip = false;
     this.blocking = false;
     this.aiming = false;
+    // Charge state belongs to the previous moveset; never carry it across.
+    this.charging = false;
+    this.chargeTime = 0;
+    this.chargeAttack = null;
     rig.root.position.copy(this.position);
     rig.root.rotation.y = this.yaw;
     // Pose the new model in the state the simulation is already in.
@@ -289,10 +328,18 @@ export class Player {
     this.dodgeBuffer = Math.max(0, this.dodgeBuffer - delta);
     // Attacks buffer briefly too, so a press during recovery or cooldown is not
     // dropped — it becomes the next swing instead of being swallowed.
+    //
+    // On a charge profile the heavy input does not fire anything: it starts the
+    // draw, and the shot leaves when the input is released.
     if (input.takeHeavy()) {
-      this.queuedAttack = this.profile.heavy;
-      this.attackBuffer = 0.22;
+      if (this.profile.charge) this.beginCharge();
+      else {
+        this.queuedAttack = this.profile.heavy;
+        this.attackBuffer = 0.22;
+      }
     } else if (input.takeAttack()) {
+      // A light shot stays responsive: it cancels a charge without firing it.
+      this.cancelCharge();
       this.queuedAttack = this.lightFlip && this.profile.lightAlt ? this.profile.lightAlt : this.profile.light;
       this.attackBuffer = 0.22;
     }
@@ -311,6 +358,8 @@ export class Player {
       this.dodgeBuffer = 0;
       this.startDodge();
     }
+
+    this.updateCharge(delta, input);
 
     if (this.queuedAttack && this.canStartAttack()) {
       const profile = this.queuedAttack;
@@ -340,11 +389,13 @@ export class Player {
       // Swinging, guarding and aiming all slow the character down rather than freezing them.
       const speedFactor = this.isAttacking
         ? 0.2
-        : this.aiming
-          ? (this.profile.aim?.moveScale ?? 1)
-          : this.blocking
-            ? (this.profile.guard?.moveScale ?? 1)
-            : 1;
+        : this.charging
+          ? (this.profile.aim?.moveScale ?? 0.35)
+          : this.aiming
+            ? (this.profile.aim?.moveScale ?? 1)
+            : this.blocking
+              ? (this.profile.guard?.moveScale ?? 1)
+              : 1;
       const targetSpeed = (move.run ? RUN_SPEED : WALK_SPEED) * inputLength * speedFactor;
 
       const accel = this.grounded ? 13 : 4.5;
@@ -398,6 +449,9 @@ export class Player {
     // Dodge i-frames: the roll is a real evasion, not just a cosmetic clip.
     if (this.invulnerable > 0) return 0;
 
+    // Being struck interrupts a charge rather than leaking the shot later.
+    this.cancelCharge();
+
     const guard = this.profile.guard;
     const blocked = this.blocking && guard !== null;
     const applied = blocked && guard ? amount * guard.damageScale : amount;
@@ -445,6 +499,9 @@ export class Player {
     this.attack = null;
     this.attackTime = 0;
     this.shotFired = false;
+    this.charging = false;
+    this.chargeTime = 0;
+    this.chargeAttack = null;
     this.hitTargets.clear();
     this.cooldown = 0;
     this.lockTimer = 0;
@@ -478,6 +535,84 @@ export class Player {
       this.grounded &&
       this.lockTimer <= 0
     );
+  }
+
+  /**
+   * Starts a held charge. Nothing is fired here: the shot leaves on release, so
+   * holding the key longer actually means more.
+   */
+  private beginCharge(): void {
+    const charge = this.profile.charge;
+    if (!charge || this.charging) return;
+    if (!this.canStartAttack()) return;
+
+    this.charging = true;
+    this.chargeTime = 0;
+    // Already drawn by the aim stance: restarting the draw over it would snap
+    // the pose, so the clip is only played when nocking from the hip.
+    if (!this.aiming) {
+      this.rig.animator.play(charge.drawClip, { once: true, fade: 0.14, clamp: true });
+    }
+  }
+
+  /** Advances or releases a held charge; runs before the attack-start gate. */
+  private updateCharge(delta: number, input: InputController): void {
+    if (!this.charging) return;
+
+    const charge = this.profile.charge;
+    if (!charge || !this.alive || this.dodging || !this.grounded) {
+      this.cancelCharge();
+      return;
+    }
+
+    if (input.isHeavyHeld()) {
+      this.chargeTime = Math.min(charge.maxTime, this.chargeTime + delta);
+      return;
+    }
+
+    // Released: the arrow leaves with whatever charge it gathered. A release
+    // before `minTime` still fires, at the minimum power.
+    this.queuedAttack = this.chargedAttack(charge);
+    this.attackBuffer = 0.12;
+    this.charging = false;
+    this.chargeTime = 0;
+  }
+
+  /** Interrupt: drops the charge without firing. */
+  private cancelCharge(): void {
+    this.charging = false;
+    this.chargeTime = 0;
+  }
+
+  /**
+   * The heavy profile with charge-scaled damage and arrow speed. One cached
+   * object is reused, so a release allocates nothing.
+   */
+  private chargedAttack(charge: ChargeProfile): AttackProfile {
+    const base = this.profile.heavy;
+    if (!this.chargeAttack) this.chargeAttack = { ...base, ranged: { speed: 0, maxRange: 0 } };
+
+    const attack = this.chargeAttack;
+    const power = this.chargePower;
+
+    attack.clip = base.clip;
+    attack.arc = base.arc;
+    attack.range = base.range;
+    attack.hitStart = base.hitStart;
+    attack.hitEnd = base.hitEnd;
+    attack.timeScale = base.timeScale;
+    attack.cooldown = base.cooldown;
+    attack.recovery = base.recovery;
+    attack.armored = base.armored;
+    attack.tag = 'heavy';
+    attack.damage = Math.round(charge.minDamage + (charge.maxDamage - charge.minDamage) * power);
+
+    if (attack.ranged && base.ranged) {
+      attack.ranged.speed = charge.minSpeed + (charge.maxSpeed - charge.minSpeed) * power;
+      attack.ranged.maxRange = base.ranged.maxRange;
+    }
+
+    return attack;
   }
 
   private canStartDodge(): boolean {
@@ -542,6 +677,7 @@ export class Player {
 
     this.dodging = true;
     this.dodgeTime = 0;
+    this.cancelCharge();
     this.dodgeClip = clip;
     this.dodgeMotion = DODGE_MOTION.get(clip) ?? null;
     this.dodgeDuration = Math.max(
@@ -663,6 +799,9 @@ export class Player {
 
   private updateLocomotion(): void {
     if (this.isAttacking || this.dodging) return;
+    // The draw clip owns the body while charging; the aim loop must not replace
+    // it, or the bow would re-draw itself every frame.
+    if (this.charging) return;
     if (!this.grounded) return;
     if (this.lockTimer > 0.05) return;
 

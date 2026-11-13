@@ -302,6 +302,58 @@ html, body {
   box-shadow: 0 0 12px rgba(255, 180, 100, 0.55);
 }
 
+#aim {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 34px;
+  height: 34px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  transition: color 120ms ease, opacity 120ms ease;
+  color: #d8e8ff;
+}
+
+#aim .aim-ring {
+  position: absolute;
+  inset: 4px;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  opacity: 0.8;
+}
+
+#aim .aim-dot {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 4px;
+  height: 4px;
+  margin: -2px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 8px currentColor;
+}
+
+#aim[data-state="enemy"] { color: #ffd18a; }
+#aim[data-state="obstacle"] { color: #ff9c7c; }
+#aim[data-state="ground"] { color: #e6c27a; }
+#aim[data-state="range"] { color: #b9d6ff; }
+
+#aim-charge {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -7px;
+  height: 2px;
+  border-radius: 2px;
+  background: currentColor;
+  transform: scaleX(0);
+  transform-origin: left center;
+  opacity: 0.9;
+}
+
+#aim-charge.is-full { box-shadow: 0 0 8px currentColor; }
+
 /* Touch combat cluster: one thumb-sized button per action, stacked beside the
    attack button so the centre of the view stays clear. */
 #lock,

@@ -228,6 +228,28 @@ test('camera boom pulls in for an obstruction and eases back out', () => {
   assert.ok(camera.distance > blocked + 1, 'boom should recover once clear');
 });
 
+test('aim camera eases to a shoulder frame and preserves boom collision', () => {
+  const obstacles: CameraObstacle[] = [];
+  const camera = new ThirdPersonCamera(1.6, { obstacles, heightAt: () => 0 });
+  const player = new THREE.Vector3(0, 0, 0);
+
+  camera.snap(0, 0.25);
+  camera.update(0.016, player);
+  const normal = camera.distance;
+  camera.setAiming(true);
+  for (let i = 0; i < 90; i += 1) camera.update(0.016, player);
+  assert.ok(camera.aimAmount > 0.98);
+  assert.ok(camera.distance <= normal + 0.1, 'aim should retain a readable gameplay distance');
+
+  obstacles.push({ kind: 'box', minX: -6, maxX: 6, minZ: -1, maxZ: 6, bottom: 0, top: 6 });
+  camera.update(0.016, player);
+  assert.ok(camera.distance < 6, 'aim boom still respects cover');
+
+  camera.setAiming(false);
+  for (let i = 0; i < 120; i += 1) camera.update(0.016, player);
+  assert.ok(camera.aimAmount < 0.02);
+});
+
 test('locked camera frames the player from behind toward the target', () => {
   const camera = new ThirdPersonCamera(1.6, { heightAt: () => 0 });
   const player = new THREE.Vector3(0, 0, 0);

@@ -53,11 +53,12 @@ export interface Impact {
 }
 
 /** Half of the authored arrow's length: the mesh origin sits at its middle. */
-const ARROW_HALF_LENGTH = 0.63;
-/** Body proxy the arrow can hit, in metres around the target's feet. */
-const BODY_RADIUS = 0.5;
-const BODY_BOTTOM = 0.15;
-const BODY_TOP = 1.8;
+export const ARROW_HALF_LENGTH = 0.63;
+/**
+ * Body proxy an arrow can hit, in metres around the target's feet. Shared with
+ * the aim preview so the reticle and the real flight agree by construction.
+ */
+export const ARROW_BODY = { radius: 0.5, bottom: 0.15, top: 1.8 } as const;
 const DEFAULT_CAPACITY = 16;
 const FORWARD = new THREE.Vector3(0, 0, 1);
 
@@ -79,7 +80,14 @@ export class ProjectilePool {
   private readonly visual: ArrowVisual;
   private readonly position = new THREE.Vector3();
   private readonly next = new THREE.Vector3();
-  private readonly cylinder = { kind: 'cylinder' as const, x: 0, z: 0, radius: BODY_RADIUS, bottom: 0, top: 0 };
+  private readonly cylinder = {
+    kind: 'cylinder' as const,
+    x: 0,
+    z: 0,
+    radius: ARROW_BODY.radius,
+    bottom: 0,
+    top: 0,
+  };
 
   constructor(scene: THREE.Scene, field: ProjectileField, visual: ArrowVisual, capacity = DEFAULT_CAPACITY) {
     this.field = field;
@@ -180,8 +188,8 @@ export class ProjectilePool {
 
         this.cylinder.x = target.position.x;
         this.cylinder.z = target.position.z;
-        this.cylinder.bottom = target.position.y + BODY_BOTTOM;
-        this.cylinder.top = target.position.y + BODY_TOP;
+        this.cylinder.bottom = target.position.y + ARROW_BODY.bottom;
+        this.cylinder.top = target.position.y + ARROW_BODY.top;
 
         const targetT = segmentCylinderEntry(
           this.position.x,

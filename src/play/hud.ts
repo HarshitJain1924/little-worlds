@@ -16,6 +16,9 @@ interface DamageNumber {
 
 export type DamageKind = 'dealt' | 'taken' | 'blocked';
 
+/** What the shooter's arrow would actually hit at the aim point. */
+export type AimState = 'enemy' | 'obstacle' | 'ground' | 'range';
+
 const scratch = new THREE.Vector3();
 
 export class Hud {
@@ -30,6 +33,9 @@ export class Hud {
   private readonly captureEl = document.querySelector<HTMLElement>('#capture');
   private readonly numbersLayer = document.querySelector<HTMLElement>('#damage-numbers');
   private readonly partyEl = document.querySelector<HTMLElement>('#party');
+  private readonly aimEl = document.querySelector<HTMLElement>('#aim');
+  private readonly aimChargeEl = document.querySelector<HTMLElement>('#aim-charge');
+  private aimState: AimState | null = null;
   private readonly characterNameEl = document.querySelector<HTMLElement>('#vitals .name');
   private readonly partyChips = new Map<string, HTMLButtonElement>();
   private partyNames = new Map<string, string>();
@@ -82,6 +88,40 @@ export class Hud {
 
   setCaptureHint(visible: boolean): void {
     if (this.captureEl) this.captureEl.hidden = !visible;
+  }
+
+  /**
+   * Fixed centre reticle with its look driven by what the shot would hit. The
+   * projectile solver still computes the actual world impact independently.
+   */
+  setAim(
+    visible: boolean,
+    _screenX: number,
+    _screenY: number,
+    state: AimState,
+    charge: number,
+    charging: boolean,
+  ): void {
+    const el = this.aimEl;
+    if (!el) return;
+
+    if (!visible) {
+      if (!el.hidden) el.hidden = true;
+      this.aimState = null;
+      return;
+    }
+
+    if (el.hidden) el.hidden = false;
+    if (this.aimState !== state) {
+      el.dataset.state = state;
+      this.aimState = state;
+    }
+
+    const bar = this.aimChargeEl;
+    if (!bar) return;
+    bar.style.transform = `scaleX(${charging ? Math.max(0.03, Math.min(1, charge)) : 0})`;
+    bar.classList.toggle('is-full', charging && charge >= 0.999);
+    el.classList.toggle('is-charging', charging);
   }
 
   /**

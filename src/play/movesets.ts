@@ -37,6 +37,8 @@ export interface CombatProfile {
   guard: GuardProfile | null;
   /** Hold the defence input to settle into this stance instead of guarding. */
   aim?: AimProfile;
+  /** Heavy attack is charged by holding the heavy input, then released. */
+  charge?: ChargeProfile;
 }
 
 export interface AimProfile {
@@ -44,6 +46,42 @@ export interface AimProfile {
   clip: string;
   /** Movement multiplier while the stance is held. */
   moveScale: number;
+}
+
+/**
+ * Held-charge configuration for a heavy attack.
+ *
+ * A partial charge is still a shot: releasing early fires at `minDamage`. Only
+ * an interruption (dodge, hit, switch, death) cancels without firing.
+ */
+export interface ChargeProfile {
+  /** Charge held before any bonus accrues. */
+  minTime: number;
+  /** Charge at which the shot is at full power. */
+  maxTime: number;
+  minDamage: number;
+  maxDamage: number;
+  minSpeed: number;
+  maxSpeed: number;
+  /** Clip played once while drawing from the hip (not when already aiming). */
+  drawClip: string;
+}
+
+/**
+ * Authored timings inside `Ranged_Bow_Release`, measured from the string hand's
+ * keyframes: it reverses direction at 0.28 s (the loose) and finishes its
+ * forward sweep at 0.65 s. Recovery is set from the sweep, not guessed.
+ */
+export const BOW_LOOSE = 0.28;
+export const BOW_RELEASE_SWEEP = 0.65;
+
+/**
+ * Seconds an attack must stay active for the release sweep to finish.
+ * The follow-through is the whole point of the clip, so no bow profile may end
+ * before the string hand has completed its travel.
+ */
+export function releaseDuration(attack: { timeScale: number }): number {
+  return BOW_RELEASE_SWEEP / attack.timeScale + 0.02;
 }
 
 export type CombatProfileId = 'knight' | 'barbarian' | 'rogue' | 'ranger';
@@ -58,6 +96,7 @@ const KNIGHT_LIGHT: AttackProfile = {
   hitEnd: 0.46,
   timeScale: 1.15,
   cooldown: 1.2,
+  tag: 'light',
 };
 
 const KNIGHT_HEAVY: AttackProfile = {
@@ -70,6 +109,7 @@ const KNIGHT_HEAVY: AttackProfile = {
   timeScale: 1,
   cooldown: 1.9,
   armored: true,
+  tag: 'heavy',
 };
 
 export const PROFILES: Record<CombatProfileId, CombatProfile> = {
@@ -105,6 +145,7 @@ export const PROFILES: Record<CombatProfileId, CombatProfile> = {
       timeScale: 1,
       cooldown: 1.5,
       recovery: 0.26,
+      tag: 'light',
     },
     heavy: {
       clip: 'Melee_2H_Attack_Chop',
@@ -117,6 +158,7 @@ export const PROFILES: Record<CombatProfileId, CombatProfile> = {
       cooldown: 2.6,
       armored: true,
       recovery: 0.4,
+      tag: 'heavy',
     },
     guard: {
       clip: 'Melee_Block',
@@ -146,6 +188,7 @@ export const PROFILES: Record<CombatProfileId, CombatProfile> = {
       timeScale: 1.35,
       cooldown: 0.55,
       recovery: 0.14,
+      tag: 'light',
     },
     lightAlt: {
       clip: 'Melee_Dualwield_Attack_Slice',
@@ -157,6 +200,7 @@ export const PROFILES: Record<CombatProfileId, CombatProfile> = {
       timeScale: 1.35,
       cooldown: 0.55,
       recovery: 0.14,
+      tag: 'light',
     },
     heavy: {
       clip: 'Melee_Dualwield_Attack_Chop',
@@ -168,6 +212,7 @@ export const PROFILES: Record<CombatProfileId, CombatProfile> = {
       timeScale: 1.1,
       cooldown: 1.8,
       recovery: 0.3,
+      tag: 'heavy',
     },
     guard: null,
   },
@@ -189,27 +234,42 @@ export const PROFILES: Record<CombatProfileId, CombatProfile> = {
       damage: 18,
       range: 40,
       arc: 0,
-      hitStart: 0.28,
-      hitEnd: 0.28,
+      hitStart: BOW_LOOSE,
+      hitEnd: BOW_LOOSE,
       timeScale: 1.45,
       cooldown: 0.62,
-      recovery: 0.16,
+      // 0.65 s of authored sweep at 1.45x is 0.448 s; the loose lands at 0.193,
+      // so the follow-through needs 0.275. Rounded up, never down.
+      recovery: 0.28,
       ranged: { speed: 34, maxRange: 40 },
+      tag: 'light',
     },
     heavy: {
       clip: 'Ranged_Bow_Release',
-      damage: 34,
+      /** Full-charge damage and speed; the charge profile interpolates up to it. */
+      damage: 46,
       range: 55,
       arc: 0,
-      hitStart: 0.28,
-      hitEnd: 0.28,
-      timeScale: 0.85,
-      cooldown: 1.5,
-      recovery: 0.26,
-      ranged: { speed: 46, maxRange: 55 },
+      hitStart: BOW_LOOSE,
+      hitEnd: BOW_LOOSE,
+      timeScale: 0.9,
+      cooldown: 1.15,
+      // Sweep ends at 0.722 s at 0.9x; release at 0.311 leaves 0.411 + slack.
+      recovery: 0.42,
+      ranged: { speed: 58, maxRange: 55 },
+      tag: 'heavy',
     },
     guard: null,
     aim: { clip: 'Ranged_Bow_Aiming_Idle', moveScale: 0.45 },
+    charge: {
+      minTime: 0.25,
+      maxTime: 1.0,
+      minDamage: 26,
+      maxDamage: 46,
+      minSpeed: 40,
+      maxSpeed: 58,
+      drawClip: 'Ranged_Bow_Draw',
+    },
   },
 };
 

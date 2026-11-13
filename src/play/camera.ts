@@ -28,6 +28,22 @@ const RECENTER_DELAY = 1.2;
 const RECENTER_MAX_ANGLE = 1.0;
 
 /**
+ * Aim mode: a tighter, shoulder-offset framing so the bow arm does not sit on
+ * top of the target. The offset is applied to the camera rig, so the avatar
+ * sits outside the central aim line instead of filling the frame.
+ */
+// Keep aim close to the normal gameplay distance. A short boom plus a narrow
+// FOV makes the avatar fill the screen and hides the combat lane.
+const AIM_DISTANCE = 8.2;
+const AIM_SHOULDER = 1.35;
+/** Smaller offset under lock, so the framed enemy stays near the centre. */
+const AIM_LOCK_SHOULDER = 0.34;
+const AIM_LIFT = 0.1;
+const AIM_LOOK_AHEAD = 2.8;
+const AIM_FOV = 48;
+const BASE_FOV = 48;
+
+/**
  * Third-person action camera.
  *
  * Yaw and pitch are independent and driven by pointer-lock mouse movement; the
@@ -67,6 +83,10 @@ export class ThirdPersonCamera {
   private shakeAmount = 0;
   private shakeTime = 0;
 
+  private aimWanted = false;
+  /** 0 = third-person follow, 1 = over-the-shoulder aim. Eased, never snapped. */
+  private aimBlend = 0;
+
   readonly bounds: CameraBounds = {
     minDistance: 3.2,
     maxDistance: 12,
@@ -100,6 +120,10 @@ export class ThirdPersonCamera {
   /** Mouse-look. `dx`/`dy` are raw pixels from pointer lock. */
   rotate(dx: number, dy: number): void {
     this.timeSinceLook = 0;
+    // Aiming is finer: the same hand movement covers less arc.
+    const gain = 1 - 0.3 * this.aimBlend;
+    dx *= gain;
+    dy *= gain;
 
     if (this.lockTarget) {
       // Orbiting is allowed, but only within a sensible arc around the target.
@@ -141,6 +165,16 @@ export class ThirdPersonCamera {
     this.zoomScale = clamp(this.zoomScale * Math.exp(amount), 0.6, 1.65);
   }
 
+  /** Ask for aim framing. The transition is eased inside `update`. */
+  setAiming(aiming: boolean): void {
+    this.aimWanted = aiming;
+  }
+
+  /** 0..1 of the aim transition, exposed for the reticle and for tests. */
+  get aimAmount(): number {
+    return this.aimBlend;
+  }
+
   /** Hard lock framing; null restores free camera behaviour. */
   setLockTarget(target: { x: number; z: number } | null): void {
     if (target === null) {
@@ -170,6 +204,20 @@ export class ThirdPersonCamera {
 
     const smoothing = 1 - Math.exp(-delta * 12);
 
+    // Aim transition: reach the stance quickly, leave it gently, so entering and
+    // leaving the stance never reads as a cut.
+    const aimTarget = this.aimWanted ? 1 : 0;
+    const aimRate = aimTarget > this.aimBlend ? 10 : 6.5;
+    this.aimBlend += (aimTarget - this.aimBlend) * (1 - Math.exp(-aimRate * delta));
+    if (Math.abs(aimTarget - this.aimBlend) < 0.002) this.aimBlend = aimTarget;
+    const aim = this.aimBlend;
+
+    const fov = BASE_FOV + (AIM_FOV - BASE_FOV) * aim;
+    if (Math.abs(this.camera.fov - fov) > 0.01) {
+      this.camera.fov = fov;
+      this.camera.updateProjectionMatrix();
+    }
+
     if (this.lockTarget) {
       const desiredYaw = Math.atan2(
         -(this.lockTarget.x - player.x),
@@ -191,7 +239,9 @@ export class ThirdPersonCamera {
     } else {
       // Gentle recentering: after a pause without looking, the camera drifts
       // behind the direction of travel instead of fixing the player's back.
-      if (this.timeSinceLook > RECENTER_DELAY && velocity) {
+      // Recentring behind travel would fight the aim direction, so it is off
+      // while the bow is up.
+      if (this.timeSinceLook > RECENTER_DELAY && velocity && !this.aimWanted) {
         const speed = Math.hypot(velocity.x, velocity.z);
         if (speed > 0.8) {
           const travelYaw = Math.atan2(-velocity.x, -velocity.z);
@@ -222,8 +272,19 @@ export class ThirdPersonCamera {
     this.yaw += yawStep * smoothing;
     this.pitch += (this.targetPitch - this.pitch) * smoothing;
 
+    // Blend to a combat distance. The lateral shoulder offset is applied to
+    // the camera rig below, rather than to the look target.
+    const boom = this.boom + (AIM_DISTANCE - this.boom) * aim;
+
     // Follow the character's chest, not their feet, so the head stays framed.
     this.focusTarget.set(player.x, player.y + this.eyeHeight, player.z);
+
+    if (aim > 0) {
+      // Look slightly past the player so the reticle has room to breathe.
+      this.focusTarget.x += -Math.sin(this.yaw) * AIM_LOOK_AHEAD * aim;
+      this.focusTarget.z += -Math.cos(this.yaw) * AIM_LOOK_AHEAD * aim;
+      this.focusTarget.y += AIM_LIFT * aim;
+    }
 
     if (this.lockTarget) {
       // Bias the framing point toward the enemy so both stay in shot.
@@ -240,10 +301,18 @@ export class ThirdPersonCamera {
     const dirZ = Math.cos(this.yaw) * cosPitch;
 
     this.desired.set(
-      this.focus.x + dirX * this.boom,
-      this.focus.y + dirY * this.boom,
-      this.focus.z + dirZ * this.boom,
+      this.focus.x + dirX * boom,
+      this.focus.y + dirY * boom,
+      this.focus.z + dirZ * boom,
     );
+
+    // Standard over-the-right-shoulder placement: the player moves left of
+    // screen centre while the camera keeps the target and reticle readable.
+    const shoulder = (this.lockTarget ? AIM_LOCK_SHOULDER : AIM_SHOULDER) * aim;
+    const rightX = Math.cos(this.yaw) * shoulder;
+    const rightZ = -Math.sin(this.yaw) * shoulder;
+    this.desired.x += rightX;
+    this.desired.z += rightZ;
 
     // Trace the boom against wall boxes and tree trunks: pull in at once, ease
     // back out only after the path is clear again.
@@ -259,8 +328,8 @@ export class ThirdPersonCamera {
     );
 
     const allowed = obstruction < 1
-      ? Math.max(0.9, this.boom * obstruction - 0.15)
-      : this.boom;
+      ? Math.max(0.9, boom * obstruction - 0.15)
+      : boom;
 
     if (allowed < this.boomCurrent) {
       this.boomCurrent = allowed;
@@ -270,9 +339,9 @@ export class ThirdPersonCamera {
 
     const boomCos = Math.cos(this.pitch);
     this.camera.position.set(
-      this.focus.x + Math.sin(this.yaw) * boomCos * this.boomCurrent,
+      this.focus.x + Math.sin(this.yaw) * boomCos * this.boomCurrent + rightX,
       this.focus.y + Math.sin(this.pitch) * this.boomCurrent,
-      this.focus.z + Math.cos(this.yaw) * boomCos * this.boomCurrent,
+      this.focus.z + Math.cos(this.yaw) * boomCos * this.boomCurrent + rightZ,
     );
 
     // Never let the camera sink into the terrain, wherever it ended up.

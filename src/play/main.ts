@@ -3,7 +3,7 @@ import './play.css';
 import { ThirdPersonCamera } from './camera';
 import type { WeaponSpec } from './character';
 import { CharacterRig, SOCKETS, weaponFrom } from './character';
-import { hasLineOfSight, nearestObstruction } from './collision';
+import { hasLineOfSight } from './collision';
 import type { GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { CombatEffects } from './effects';
 import { InputController } from './input';
@@ -21,6 +21,7 @@ import { ADVENTURERS, findAdventurer, type CharacterId, type WeaponKey } from '.
 import { profileFor } from './movesets';
 import type { ArrowVisual, Impact } from './projectiles';
 import { ProjectilePool } from './projectiles';
+import { solveShot, type AimSolution } from './aim';
 
 const loadingFill = document.querySelector<HTMLElement>('#loading-fill');
 const loadingLabel = document.querySelector<HTMLElement>('#loading-label');
@@ -270,62 +271,46 @@ async function boot(): Promise<void> {
   const shotOrigin = new THREE.Vector3();
   const shotDirection = new THREE.Vector3();
   const muzzle = new THREE.Vector3();
+  const aimReference = new THREE.Vector3();
 
   /**
    * Where the camera forward ray first meets the world: an obstacle, the ground,
    * or nothing within range. Firing at this point (rather than parallel to the
    * view) is what makes pitch matter.
    */
-  function cameraAimPoint(out: THREE.Vector3, maxRange: number): THREE.Vector3 {
+  function solvePlayerAim(maxRange: number): AimSolution {
     cameraRig.camera.getWorldDirection(aimCamera);
     aimRay.set(player.position.x, player.position.y + AIM_HEIGHT, player.position.z);
+    player.weaponHand(muzzle);
+    muzzle.y += 0.06;
 
-    const endX = aimRay.x + aimCamera.x * maxRange;
-    const endY = aimRay.y + aimCamera.y * maxRange;
-    const endZ = aimRay.z + aimCamera.z * maxRange;
-    const obstruction = nearestObstruction(
-      aimRay.x,
-      aimRay.y,
-      aimRay.z,
-      endX,
-      endY,
-      endZ,
-      world.obstacles,
-      0.1,
-    );
-
-    // Terrain has no proxy, so march the (already shortened) ray in coarse steps.
-    let reach = Math.max(1.5, obstruction * maxRange);
-    for (let distance = 0.75; distance <= reach; distance += 0.75) {
-      const x = aimRay.x + aimCamera.x * distance;
-      const y = aimRay.y + aimCamera.y * distance;
-      const z = aimRay.z + aimCamera.z * distance;
-      if (y <= world.heightAt(x, z)) {
-        reach = distance;
-        break;
-      }
+    // Free aim uses the camera centre. Lock-on only supplies a preferred point;
+    // the shared solver still decides whether the body is actually reachable.
+    const locked = tracker.locked;
+    if (locked && locked.alive) {
+      aimReference.set(locked.position.x, locked.position.y + 1.05, locked.position.z);
+    } else {
+      aimReference.copy(aimRay).addScaledVector(aimCamera, maxRange);
     }
 
-    return out.set(
-      aimRay.x + aimCamera.x * reach,
-      aimRay.y + aimCamera.y * reach,
-      aimRay.z + aimCamera.z * reach,
-    );
+    shotDirection.copy(aimReference).sub(muzzle);
+    if (shotDirection.lengthSq() < 1e-6) shotDirection.copy(aimCamera);
+    shotDirection.normalize();
+    shotOrigin.copy(muzzle).addScaledVector(shotDirection, 0.4);
+    // Re-solve from the projectile's real starting point. The second pass
+    // removes the small muzzle offset from the preview/flight disagreement.
+    solveShot(shotOrigin, shotDirection, world, enemies, maxRange, aimPoint);
+    shotDirection.copy(aimPoint).sub(shotOrigin).normalize();
+    return solveShot(shotOrigin, shotDirection, world, enemies, maxRange, aimPoint);
   }
 
   player.onRangedShot = (attack) => {
     const ranged = attack.ranged;
     if (!ranged) return;
 
-    player.weaponHand(muzzle);
-    muzzle.y += 0.06;
+    solvePlayerAim(ranged.maxRange);
 
-    // A hard lock wins over the camera: the arrow goes to the selected body.
-    const locked = tracker.locked;
-    if (locked && locked.alive) aimPoint.set(locked.position.x, locked.position.y + 1.05, locked.position.z);
-    else cameraAimPoint(aimPoint, ranged.maxRange);
-
-    shotDirection.copy(aimPoint).sub(muzzle);
+    shotDirection.copy(aimPoint).sub(shotOrigin);
     if (shotDirection.lengthSq() < 1e-6) return;
     shotDirection.normalize();
     shotOrigin.copy(muzzle).addScaledVector(shotDirection, 0.4);
@@ -338,7 +323,7 @@ async function boot(): Promise<void> {
       maxRange: ranged.maxRange,
     });
 
-    const heavy = attack === player.profile.heavy;
+    const heavy = attack.tag === 'heavy';
     sfx.bowRelease(heavy);
     cameraRig.shake(heavy ? 0.06 : 0.035);
   };
@@ -678,6 +663,7 @@ async function boot(): Promise<void> {
     player.setLockTarget(locked ? locked.position : null);
     cameraRig.setLockTarget(locked ? locked.position : null);
 
+    cameraRig.setAiming(player.isAiming);
     cameraRig.update(delta, player.position, player.velocity);
     effects.update(delta, cameraRig.camera);
     vfx.update(delta, cameraRig.camera);
@@ -687,6 +673,26 @@ async function boot(): Promise<void> {
     sun.target.updateMatrixWorld();
 
     hud.setTarget(tracker.locked ?? tracker.soft, tracker.isLocked);
+
+    if (player.isAiming && player.profile.aim?.clip) {
+      const ranged = player.isCharging ? player.profile.heavy.ranged : player.profile.light.ranged;
+      const solution = solvePlayerAim(ranged?.maxRange ?? 55);
+      // The visible reticle is deliberately screen-centred, like a normal
+      // third-person bow/shooter camera. The solver still uses aimPoint for the
+      // real projectile direction and uses `solution.kind` for honest feedback;
+      // projecting the impact point itself made a nearby ground hit draw the
+      // reticle back over the Ranger's head.
+      hud.setAim(
+        true,
+        window.innerWidth * 0.5,
+        window.innerHeight * 0.5,
+        solution.kind,
+        player.chargeProgress,
+        player.isCharging,
+      );
+    } else {
+      hud.setAim(false, 0, 0, 'range', 0, false);
+    }
 
     // Run-end state lives here so it fires whether the loop is running or the
     // simulation is being stepped by a test.
@@ -888,6 +894,7 @@ async function boot(): Promise<void> {
       input.virtual.y = move.y ?? 0;
       input.virtual.run = move.run ?? false;
       input.virtual.block = move.block ?? false;
+      input.virtual.heavy = move.heavy ?? false;
       if (move.attack) input.queueAttack();
       if (move.heavy) input.queueHeavy();
       if (move.dodge) input.queueDodge();
