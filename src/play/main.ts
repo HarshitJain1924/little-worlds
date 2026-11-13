@@ -350,13 +350,12 @@ async function boot(): Promise<void> {
       aimSolution = { kind: 'enemy', target: locked, distance: muzzle.distanceTo(aimReference) };
     } else {
       // Free aim: raycast from the camera sightline forward from the player's depth.
-      // This matches what the screen-centred crosshair points at, eliminating
-      // the third-person shoulder parallax error while ignoring anything behind the avatar.
+      // Offset by -1.2m so close-range enemies in front of the avatar are never clipped out.
       const depth = Math.max(
         0,
         (player.position.x - cameraPos.x) * aimCamera.x +
         (player.position.y + AIM_HEIGHT - cameraPos.y) * aimCamera.y +
-        (player.position.z - cameraPos.z) * aimCamera.z,
+        (player.position.z - cameraPos.z) * aimCamera.z - 1.2,
       );
       cameraRay.copy(cameraPos).addScaledVector(aimCamera, depth);
       aimSolution = solveShot(cameraRay, aimCamera, world, enemies, maxRange, aimReference);
@@ -381,7 +380,9 @@ async function boot(): Promise<void> {
     // Solve from the projectile's actual origin. The returned aim state honestly
     // represents the actual projectile path and its collision result (never reporting
     // 'enemy' if the actual muzzle shot misses, is blocked by cover, or returns 'range').
-    const shotSolution = solveShot(shotOrigin, shotDirection, world, enemies, maxRange, aimPoint);
+    const projectileRadius =
+      player.isAbilityActive && player.currentAbility?.kind === 'nova' ? 0.48 : 0;
+    const shotSolution = solveShot(shotOrigin, shotDirection, world, enemies, maxRange, aimPoint, projectileRadius);
     return shotSolution;
   }
 
@@ -442,6 +443,10 @@ async function boot(): Promise<void> {
         maxRange: ability.maxRange,
         kind: 'arcaneOrb',
         explosive: true,
+        explosionRadius: ability.radius,
+        explosionDamage: ability.damage,
+        maxVerticalOffset: ability.maxVerticalOffset ?? 2.5,
+        radius: 0.48,
       });
 
       effects.hideChargeAura();
@@ -581,7 +586,9 @@ async function boot(): Promise<void> {
   /** Projectile impact feedback (arrows, piercing arrows, magic bolts, and Arcane Nova explosive orb). */
   function onProjectileImpact(impact: Impact): void {
     if (impact.shotKind === 'arcaneOrb') {
-      const novaRadius = (player.profile.ability as ArcaneNovaAbilityProfile)?.radius ?? 5.5;
+      const novaRadius = impact.explosionRadius ?? 5.5;
+      const novaDamage = impact.explosionDamage ?? impact.damage;
+      const maxVertical = impact.maxVerticalOffset ?? 2.5;
 
       // 1. Large purple magical explosion centered on the impact position
       effects.spawnNova(impact.position, novaRadius);
@@ -592,11 +599,11 @@ async function boot(): Promise<void> {
       // 2. Centered AoE damage at impact position
       executeExplosionAoE(
         impact.position,
-        impact.damage,
+        novaDamage,
         novaRadius,
         enemies,
         world.obstacles,
-        2.0,
+        maxVertical,
         (enemy, dmg) => {
           hud.damageNumber(enemy.position, dmg, 'dealt');
           effects.spawn(enemy.position, 'magicHeavy');
@@ -604,6 +611,7 @@ async function boot(): Promise<void> {
           hitStopTimer = Math.max(hitStopTimer, 0.08);
           if (!enemy.alive) sfx.enemyDeath();
         },
+        impact.target,
       );
       return;
     }

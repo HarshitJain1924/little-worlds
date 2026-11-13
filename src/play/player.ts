@@ -75,38 +75,64 @@ export function executeExplosionAoE(
   radius: number,
   targets: readonly unknown[],
   obstacles: readonly CameraObstacle[] = [],
-  maxVertical = 2.0,
+  maxVertical = 2.5,
   onDamageApplied?: (enemy: Enemy, damage: number) => void,
+  directTarget?: unknown | null,
 ): Enemy[] {
   const damagedEnemies: Enemy[] = [];
   const radiusSq = radius * radius;
-  const originY = impactPosition.y + 0.2;
 
   for (const candidate of targets) {
     if (!candidate || typeof candidate !== 'object' || !('takeDamage' in candidate)) continue;
     const enemy = candidate as Enemy;
     if (!enemy.alive) continue;
 
-    const dy = Math.abs(enemy.position.y - impactPosition.y);
-    if (dy > maxVertical) continue;
+    // Direct target struck by projectile is unconditionally damaged
+    if (directTarget && enemy === directTarget) {
+      const hitApplied = enemy.takeDamage(damage, impactPosition as THREE.Vector3);
+      if (hitApplied) {
+        damagedEnemies.push(enemy);
+        onDamageApplied?.(enemy, damage);
+      }
+      continue;
+    }
 
     const dx = enemy.position.x - impactPosition.x;
     const dz = enemy.position.z - impactPosition.z;
-    const distSq = dx * dx + dz * dz;
-    if (distSq > radiusSq) continue;
+    const horizontalDistSq = dx * dx + dz * dz;
+    if (horizontalDistSq > radiusSq) continue;
 
-    if (
-      !hasLineOfSight(
-        impactPosition.x,
-        originY,
-        impactPosition.z,
+    // Vertical distance relative to enemy vertical span [feet, head]
+    const enemyBottom = enemy.position.y;
+    const enemyTop = enemy.position.y + 1.8;
+    const dy = Math.max(0, enemyBottom - impactPosition.y, impactPosition.y - enemyTop);
+    if (dy > maxVertical) continue;
+
+    if (horizontalDistSq + dy * dy > radiusSq) continue;
+
+    const targetChestY = enemy.position.y + 1.1;
+    const dirX = enemy.position.x - impactPosition.x;
+    const dirY = targetChestY - impactPosition.y;
+    const dirZ = enemy.position.z - impactPosition.z;
+    const len = Math.hypot(dirX, dirY, dirZ);
+
+    if (len > 0.001 && obstacles.length > 0) {
+      // Offset start point slightly along ray towards target to avoid self-intersection on impact surface
+      const offset = Math.min(0.08, len * 0.1);
+      const startX = impactPosition.x + (dirX / len) * offset;
+      const startY = impactPosition.y + (dirY / len) * offset;
+      const startZ = impactPosition.z + (dirZ / len) * offset;
+
+      const clear = hasLineOfSight(
+        startX,
+        startY,
+        startZ,
         enemy.position.x,
-        enemy.position.y + 1.2,
+        targetChestY,
         enemy.position.z,
         obstacles,
-      )
-    ) {
-      continue;
+      );
+      if (!clear) continue;
     }
 
     const hitApplied = enemy.takeDamage(damage, impactPosition as THREE.Vector3);
@@ -726,13 +752,14 @@ export class Player {
     this.clampToArena();
     resolveBlockers(this.position, this.world.blockers, BODY_RADIUS);
 
+    this.rig.root.position.copy(this.position);
+    this.rig.root.rotation.y = this.yaw;
+
     this.updateAttack(delta);
     this.updateAbility(delta);
     this.updateDodge(delta);
     this.updateLocomotion();
 
-    this.rig.root.position.copy(this.position);
-    this.rig.root.rotation.y = this.yaw;
     this.rig.update(delta);
   }
 

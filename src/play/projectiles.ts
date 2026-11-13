@@ -48,6 +48,10 @@ export interface Shot {
   kind?: ProjectileKind;
   piercing?: boolean;
   explosive?: boolean;
+  explosionRadius?: number;
+  explosionDamage?: number;
+  maxVerticalOffset?: number;
+  radius?: number;
 }
 
 export type ImpactKind = 'target' | 'obstacle' | 'ground' | 'expired';
@@ -60,6 +64,10 @@ export interface Impact {
   damage: number;
   /** The body that was struck, or null for geometry and timeouts. */
   target: ProjectileTarget | null;
+  explosionRadius?: number;
+  explosionDamage?: number;
+  maxVerticalOffset?: number;
+  radius?: number;
 }
 
 /** Half of the authored arrow's length: the mesh origin sits at its middle. */
@@ -85,6 +93,10 @@ interface Arrow {
   travelled: number;
   piercing: boolean;
   explosive: boolean;
+  explosionRadius: number;
+  explosionDamage: number;
+  maxVerticalOffset: number;
+  radius: number;
   readonly hitTargets: Set<ProjectileTarget>;
 }
 
@@ -165,6 +177,10 @@ export class ProjectilePool {
         travelled: 0,
         piercing: false,
         explosive: false,
+        explosionRadius: 0,
+        explosionDamage: 0,
+        maxVerticalOffset: 0,
+        radius: 0,
         hitTargets: new Set<ProjectileTarget>(),
       });
     }
@@ -174,6 +190,39 @@ export class ProjectilePool {
     let count = 0;
     for (const arrow of this.arrows) if (arrow.active) count += 1;
     return count;
+  }
+
+  /** Inspect a projectile slot's internal state (for verification/testing). */
+  inspectSlot(index: number): Readonly<{
+    active: boolean;
+    kind: ProjectileKind;
+    damage: number;
+    speed: number;
+    maxRange: number;
+    travelled: number;
+    piercing: boolean;
+    explosive: boolean;
+    explosionRadius: number;
+    explosionDamage: number;
+    maxVerticalOffset: number;
+    radius: number;
+  }> | undefined {
+    const arrow = this.arrows[index];
+    if (!arrow) return undefined;
+    return {
+      active: arrow.active,
+      kind: arrow.kind,
+      damage: arrow.damage,
+      speed: arrow.speed,
+      maxRange: arrow.maxRange,
+      travelled: arrow.travelled,
+      piercing: arrow.piercing,
+      explosive: arrow.explosive,
+      explosionRadius: arrow.explosionRadius,
+      explosionDamage: arrow.explosionDamage,
+      maxVerticalOffset: arrow.maxVerticalOffset,
+      radius: arrow.radius,
+    };
   }
 
   /**
@@ -194,6 +243,10 @@ export class ProjectilePool {
     arrow.kind = kind;
     arrow.piercing = Boolean(shot.piercing);
     arrow.explosive = Boolean(shot.explosive);
+    arrow.explosionRadius = shot.explosionRadius ?? (arrow.explosive ? 5.5 : 0);
+    arrow.explosionDamage = shot.explosionDamage ?? (arrow.explosive ? shot.damage : 0);
+    arrow.maxVerticalOffset = shot.maxVerticalOffset ?? (arrow.explosive ? 2.5 : 0);
+    arrow.radius = shot.radius ?? (kind === 'arcaneOrb' ? 0.48 : 0);
     arrow.hitTargets.clear();
     arrow.active = true;
     arrow.travelled = 0;
@@ -225,13 +278,23 @@ export class ProjectilePool {
 
       const remaining = arrow.maxRange - arrow.travelled;
       if (remaining <= 0) {
+        const shotKind = arrow.kind;
+        const damage = arrow.damage;
+        const explosionRadius = arrow.explosionRadius;
+        const explosionDamage = arrow.explosionDamage;
+        const maxVerticalOffset = arrow.maxVerticalOffset;
+        const radius = arrow.radius;
         this.retire(arrow);
         onImpact({
           kind: 'expired',
-          shotKind: arrow.kind,
+          shotKind,
           position: arrow.tip,
-          damage: arrow.damage,
+          damage,
           target: null,
+          explosionRadius,
+          explosionDamage,
+          maxVerticalOffset,
+          radius,
         });
         continue;
       }
@@ -246,6 +309,7 @@ export class ProjectilePool {
         let blockT = 1;
         let blockKind: ImpactKind = 'expired';
 
+        const obstaclePadding = Math.max(0.02, arrow.radius);
         const obstacleT = nearestObstruction(
           this.position.x,
           this.position.y,
@@ -254,7 +318,7 @@ export class ProjectilePool {
           this.next.y,
           this.next.z,
           this.field.obstacles,
-          0.02,
+          obstaclePadding,
         );
         if (obstacleT < blockT) {
           blockT = obstacleT;
@@ -262,8 +326,9 @@ export class ProjectilePool {
         }
 
         const ground = this.field.heightAt(this.next.x, this.next.z);
-        if (this.next.y <= ground && this.position.y > this.next.y) {
-          const groundT = (this.position.y - ground) / (this.position.y - this.next.y);
+        const targetGround = ground + arrow.radius;
+        if (this.next.y <= targetGround && this.position.y > this.next.y) {
+          const groundT = (this.position.y - targetGround) / (this.position.y - this.next.y);
           if (groundT < blockT) {
             blockT = groundT;
             blockKind = 'ground';
@@ -288,7 +353,7 @@ export class ProjectilePool {
             this.next.y,
             this.next.z,
             this.cylinder,
-            0,
+            arrow.radius,
           );
           if (targetT <= blockT && targetT < 1) {
             this.targetHits.push({ target, targetT });
@@ -309,6 +374,10 @@ export class ProjectilePool {
             position: this.hitPosition,
             damage: arrow.damage,
             target: hit.target,
+            explosionRadius: arrow.explosionRadius,
+            explosionDamage: arrow.explosionDamage,
+            maxVerticalOffset: arrow.maxVerticalOffset,
+            radius: arrow.radius,
           });
         }
 
@@ -316,13 +385,31 @@ export class ProjectilePool {
           arrow.tip.lerpVectors(this.position, this.next, blockT);
           arrow.travelled += step * blockT;
           this.place(arrow);
+          const surfacePosition = this.hitPosition.copy(arrow.tip);
+          if (arrow.radius > 0) {
+            if (blockKind === 'ground') {
+              surfacePosition.y = ground;
+            } else {
+              surfacePosition.addScaledVector(arrow.direction, arrow.radius);
+            }
+          }
+          const shotKind = arrow.kind;
+          const damage = arrow.damage;
+          const explosionRadius = arrow.explosionRadius;
+          const explosionDamage = arrow.explosionDamage;
+          const maxVerticalOffset = arrow.maxVerticalOffset;
+          const radius = arrow.radius;
           this.retire(arrow);
           onImpact({
             kind: blockKind,
-            shotKind: arrow.kind,
-            position: arrow.tip,
-            damage: arrow.damage,
+            shotKind,
+            position: surfacePosition,
+            damage,
             target: null,
+            explosionRadius,
+            explosionDamage,
+            maxVerticalOffset,
+            radius,
           });
           continue;
         }
@@ -339,6 +426,7 @@ export class ProjectilePool {
       let kind: ImpactKind = 'expired';
       let struck: ProjectileTarget | null = null;
 
+      const obstaclePadding = Math.max(0.02, arrow.radius);
       const obstacleT = nearestObstruction(
         this.position.x,
         this.position.y,
@@ -347,7 +435,7 @@ export class ProjectilePool {
         this.next.y,
         this.next.z,
         this.field.obstacles,
-        0.02,
+        obstaclePadding,
       );
       if (obstacleT < hitT) {
         hitT = obstacleT;
@@ -370,7 +458,7 @@ export class ProjectilePool {
           this.next.y,
           this.next.z,
           this.cylinder,
-          0,
+          arrow.radius,
         );
         // Ties go to the body, so an arrow grazing a crate still finds the hit.
         if (targetT <= hitT && targetT < 1) {
@@ -381,8 +469,9 @@ export class ProjectilePool {
       }
 
       const ground = this.field.heightAt(this.next.x, this.next.z);
-      if (this.next.y <= ground && this.position.y > this.next.y) {
-        const groundT = (this.position.y - ground) / (this.position.y - this.next.y);
+      const targetGround = ground + arrow.radius;
+      if (this.next.y <= targetGround && this.position.y > this.next.y) {
+        const groundT = (this.position.y - targetGround) / (this.position.y - this.next.y);
         if (groundT < hitT) {
           hitT = groundT;
           kind = 'ground';
@@ -399,13 +488,34 @@ export class ProjectilePool {
         }
 
         this.place(arrow);
+
+        const surfacePosition = this.hitPosition.copy(arrow.tip);
+        if (arrow.radius > 0) {
+          if (kind === 'ground') {
+            surfacePosition.y = ground;
+          } else {
+            surfacePosition.addScaledVector(arrow.direction, arrow.radius);
+          }
+        }
+
+        const shotKind = arrow.kind;
+        const damage = arrow.damage;
+        const explosionRadius = arrow.explosionRadius;
+        const explosionDamage = arrow.explosionDamage;
+        const maxVerticalOffset = arrow.maxVerticalOffset;
+        const radius = arrow.radius;
+
         this.retire(arrow);
         onImpact({
           kind,
-          shotKind: arrow.kind,
-          position: arrow.tip,
-          damage: arrow.damage,
+          shotKind,
+          position: surfacePosition,
+          damage,
           target: struck,
+          explosionRadius,
+          explosionDamage,
+          maxVerticalOffset,
+          radius,
         });
         continue;
       }
@@ -444,6 +554,15 @@ export class ProjectilePool {
   private retire(arrow: Arrow): void {
     arrow.active = false;
     arrow.piercing = false;
+    arrow.explosive = false;
+    arrow.explosionRadius = 0;
+    arrow.explosionDamage = 0;
+    arrow.maxVerticalOffset = 0;
+    arrow.radius = 0;
+    arrow.travelled = 0;
+    arrow.speed = 0;
+    arrow.damage = 0;
+    arrow.maxRange = 0;
     arrow.hitTargets.clear();
     for (const mesh of arrow.meshes.values()) {
       mesh.visible = false;

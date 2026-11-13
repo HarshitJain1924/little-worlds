@@ -49,6 +49,7 @@ export function solveShot(
   targets: readonly ProjectileTarget[],
   maxRange: number,
   out: THREE.Vector3,
+  radius = 0,
 ): AimSolution {
   const dirY = direction.y;
 
@@ -58,6 +59,7 @@ export function solveShot(
   let kind: AimKind = 'range';
   let struck: ProjectileTarget | null = null;
 
+  const obstaclePadding = Math.max(0.02, radius);
   const obstacleT = nearestObstruction(
     origin.x,
     origin.y,
@@ -66,7 +68,7 @@ export function solveShot(
     origin.y + direction.y * maxRange,
     origin.z + direction.z * maxRange,
     field.obstacles,
-    0.02,
+    obstaclePadding,
   );
   if (obstacleT < hitT) {
     hitT = obstacleT;
@@ -89,7 +91,7 @@ export function solveShot(
       origin.y + direction.y * maxRange,
       origin.z + direction.z * maxRange,
       cylinder,
-      0,
+      radius,
     );
     // Ties go to the body, exactly as in the projectile pool.
     if (targetT <= hitT && targetT < 1) {
@@ -105,7 +107,7 @@ export function solveShot(
     const limit = hitT * maxRange;
     let previous = 0;
     for (let distance = GROUND_STEP; distance <= limit; distance += GROUND_STEP) {
-      if (origin.y + dirY * distance > field.heightAt(origin.x + direction.x * distance, origin.z + direction.z * distance)) {
+      if (origin.y + dirY * distance > field.heightAt(origin.x + direction.x * distance, origin.z + direction.z * distance) + radius) {
         previous = distance;
         continue;
       }
@@ -116,7 +118,7 @@ export function solveShot(
         const middle = (low + high) * 0.5;
         const x = origin.x + direction.x * middle;
         const z = origin.z + direction.z * middle;
-        if (origin.y + dirY * middle <= field.heightAt(x, z)) high = middle;
+        if (origin.y + dirY * middle <= field.heightAt(x, z) + radius) high = middle;
         else low = middle;
       }
 
@@ -132,6 +134,13 @@ export function solveShot(
 
   const distance = hitT * maxRange;
   out.copy(origin).addScaledVector(direction, distance);
+  if (radius > 0 && kind !== 'range') {
+    if (kind === 'ground') {
+      out.y = field.heightAt(out.x, out.z);
+    } else {
+      out.addScaledVector(direction, radius);
+    }
+  }
 
   return { kind, target: kind === 'enemy' ? struck : null, distance };
 }

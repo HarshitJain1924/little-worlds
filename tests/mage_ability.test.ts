@@ -327,20 +327,31 @@ test('Forward launch direction and staff-tip spawn position', () => {
 });
 
 test('Reticle aim and shoulder camera parallax convergence', () => {
-  // Test solver convergence: camera is at (0.45, 1.7, 4.0), muzzle is at (0.35, 1.4, 0.2)
-  // Crosshair aims at distant enemy at (0, 1.05, -15). The shot trajectory from muzzle must hit that enemy.
+  // Complete camera-to-muzzle path:
+  // 1. Camera is at over-the-shoulder position (0.45, 1.7, 4.0), aiming along aimCamera (0, -0.043, -1).
+  // 2. Center-screen crosshair raycasts into world and intersects enemy at (0, 1.05, -15).
+  // 3. Convergence solver computes shotDirection from muzzle (0.35, 1.4, 0.2) toward aimReference.
+  // 4. Muzzle projectile trajectory converges and strikes the aimed enemy.
   const world = { obstacles: [], heightAt: () => 0 };
   const targetEnemy = makeEnemy(0, 0, -15);
+  const cameraPos = new THREE.Vector3(0.45, 1.7, 4.0);
+  const aimCamera = new THREE.Vector3(0, -0.043, -1).normalize();
   const muzzle = new THREE.Vector3(0.35, 1.4, 0.2);
-  const targetPoint = new THREE.Vector3(0, 1.05, -15);
 
-  const shotDir = targetPoint.clone().sub(muzzle).normalize();
+  // Step 1: Camera screen ray
+  const aimReference = new THREE.Vector3();
+  const cameraSol = solveShot(cameraPos, aimCamera, world as never, [targetEnemy], 40, aimReference);
+  assert.equal(cameraSol.kind, 'enemy');
+  assert.equal(cameraSol.target, targetEnemy);
+
+  // Step 2: Parallax convergence from muzzle to aimReference
+  const shotDir = aimReference.clone().sub(muzzle).normalize();
   const aimPoint = new THREE.Vector3();
-  const solution = solveShot(muzzle, shotDir, world as never, [targetEnemy], 40, aimPoint);
+  const shotSolution = solveShot(muzzle, shotDir, world as never, [targetEnemy], 40, aimPoint, 0.48);
 
-  assert.equal(solution.kind, 'enemy');
-  assert.equal(solution.target, targetEnemy);
-  assert.ok(aimPoint.distanceTo(targetPoint) < 0.6, 'Trajectory converges on crosshair target');
+  assert.equal(shotSolution.kind, 'enemy');
+  assert.equal(shotSolution.target, targetEnemy);
+  assert.ok(aimPoint.distanceTo(aimReference) < 0.25, 'Trajectory converges on crosshair target');
 });
 
 test('Explosive orb flight, visible trail step callback, and enemy impact detonation', () => {
@@ -553,6 +564,68 @@ test('executeExplosionAoE: multiple enemies and no duplicate damage', () => {
   e1.alive = false;
   const hitEnemies2 = executeExplosionAoE(detonationPoint, 65, 5.5, targets, []);
   assert.equal(hitEnemies2.includes(e1 as unknown as Enemy), false);
+});
+
+test('executeExplosionAoE: detonation on obstacle surface damages nearby enemies without self-intersection acne', () => {
+  const wall: CameraObstacle = {
+    kind: 'box',
+    minX: 5,
+    maxX: 7,
+    minZ: 5,
+    maxZ: 7,
+    bottom: 0,
+    top: 3,
+  };
+
+  // Orb hits the wall surface at (5.0, 1.5, 6.0)
+  const wallImpactPoint = { x: 5.0, y: 1.5, z: 6.0 };
+  // Enemy standing in front of the wall at (3.5, 0, 6.0) (distance ~2.1m < 5.5m)
+  const enemyNearWall = makeEnemy(3.5, 0, 6.0);
+  // Separate enemy behind a second intervening wall
+  const interveningWall: CameraObstacle = {
+    kind: 'box',
+    minX: 2,
+    maxX: 2.5,
+    minZ: 5,
+    maxZ: 7,
+    bottom: 0,
+    top: 3,
+  };
+  const enemyBehindCover = makeEnemy(1.0, 0, 6.0);
+
+  const hitEnemies = executeExplosionAoE(
+    wallImpactPoint,
+    65,
+    5.5,
+    [enemyNearWall, enemyBehindCover],
+    [wall, interveningWall],
+  );
+
+  assert.equal(hitEnemies.length, 1);
+  assert.equal(hitEnemies[0], enemyNearWall);
+  assert.equal(enemyNearWall.health, 35, 'Enemy in open in front of wall is damaged');
+  assert.equal(enemyBehindCover.health, 100, 'Enemy behind intervening wall is protected');
+});
+
+test('executeExplosionAoE: direct projectile target is reliably damaged on uneven terrain or slopes', () => {
+  // Enemy standing on a downhill slope at y = -0.4, projectile hit at upper chest y = 1.8 (gap dy = 2.2)
+  const downhillEnemy = makeEnemy(0, -0.4, 10);
+  const directHitPoint = { x: 0, y: 1.8, z: 10 };
+
+  const hitEnemies = executeExplosionAoE(
+    directHitPoint,
+    65,
+    5.5,
+    [downhillEnemy],
+    [],
+    2.5,
+    undefined,
+    downhillEnemy,
+  );
+
+  assert.equal(hitEnemies.length, 1);
+  assert.equal(hitEnemies[0], downhillEnemy);
+  assert.equal(downhillEnemy.health, 35, 'Directly hit enemy received explosion damage');
 });
 
 test('Cooldown persistence across character switches and duplicate cast prevention', () => {
@@ -858,4 +931,377 @@ test('Regression check: Knight, Barbarian, Rogue, and Ranger abilities remain fu
   assert.equal(rig.animator.playing, 'Ranged_Bow_Draw');
   player.update(1.0, input as never, camera as never);
   assert.equal(player.isAbilityActive, false);
+});
+
+test('Launch-time explosion radius and damage remain unchanged after character switching', () => {
+  const { rig, player, camera, input } = createTestEnvironment('mage');
+  const scene = new THREE.Scene();
+  const pool = new ProjectilePool(scene, FLAT, { arcaneOrb: dummyOrbVisual() }, 4);
+  const enemy = makeEnemy(0, 0, -10);
+
+  let capturedAbility: any = null;
+  player.onAbilityRangedShot = (ability) => {
+    capturedAbility = ability;
+  };
+
+  input.abilityEdge = true;
+  player.update(1 / 60, input as never, camera as never);
+  // Advance to release time (0.85s)
+  player.update(MAGE_NOVA_RELEASE_TIME, input as never, camera as never);
+  assert.ok(capturedAbility, 'Orb ability was released');
+  assert.equal(capturedAbility.radius, 5.5);
+  assert.equal(capturedAbility.damage, 65);
+
+  // Snapshot projectile properties into Shot at launch as done in main.ts
+  const spawned = pool.spawn({
+    origin: new THREE.Vector3(0, 1.2, 0),
+    direction: new THREE.Vector3(0, 0, -1),
+    speed: capturedAbility.speed,
+    damage: capturedAbility.damage,
+    maxRange: capturedAbility.maxRange,
+    kind: 'arcaneOrb',
+    explosive: true,
+    explosionRadius: capturedAbility.radius,
+    explosionDamage: capturedAbility.damage,
+    maxVerticalOffset: capturedAbility.maxVerticalOffset ?? 2.5,
+    radius: 0.48,
+  });
+  assert.equal(spawned, true);
+
+  // Now, player switches to Barbarian while orb is in flight!
+  player.replaceRig(rig as never, profileFor('barbarian'));
+  assert.equal(player.profile.id, 'barbarian');
+  assert.equal(player.profile.ability?.kind, 'whirlwind');
+  assert.equal(player.profile.ability?.radius, 2.8);
+  assert.equal(player.profile.ability?.damage, 55);
+
+  // Step the projectile until it impacts the enemy
+  let impactReported: Impact | null = null;
+  pool.update(0.5, [enemy], (impact) => {
+    impactReported = impact;
+  });
+
+  assert.ok(impactReported, 'Orb impact occurred');
+  assert.equal((impactReported as Impact).kind, 'target');
+  // Must preserve Mage's launch-time properties, NOT Barbarian's current profile values!
+  assert.equal((impactReported as Impact).explosionRadius, 5.5);
+  assert.equal((impactReported as Impact).explosionDamage, 65);
+  assert.equal((impactReported as Impact).maxVerticalOffset, 2.0);
+  assert.equal((impactReported as Impact).radius, 0.48);
+});
+
+test('Impact handler never reads the currently active character\'s ability profile', () => {
+  const { rig, player, camera, input } = createTestEnvironment('mage');
+  const scene = new THREE.Scene();
+  const pool = new ProjectilePool(scene, FLAT, { arcaneOrb: dummyOrbVisual() }, 4);
+
+  // An enemy placed at distance 4.0m from impact point:
+  // If explosion uses Mage radius (5.5m), enemy is hit!
+  // If handler erroneously read Barbarian ability radius (3.2m), enemy would be missed!
+  const distantEnemy = makeEnemy(0, 0, -14); // 4.0m away from impact point
+  const closeEnemy = makeEnemy(0, 0, -11); // 1.0m away from impact point
+  const enemies = [distantEnemy, closeEnemy];
+
+  let launchedAbility: any = null;
+  player.onAbilityRangedShot = (ability) => {
+    launchedAbility = ability;
+  };
+
+  input.abilityEdge = true;
+  player.update(1 / 60, input as never, camera as never);
+  player.update(MAGE_NOVA_RELEASE_TIME, input as never, camera as never);
+  assert.ok(launchedAbility);
+
+  // Snapshot projectile properties into Shot
+  pool.spawn({
+    origin: new THREE.Vector3(0, 1.2, 0),
+    direction: new THREE.Vector3(0, 0, -1),
+    speed: launchedAbility.speed,
+    damage: launchedAbility.damage,
+    maxRange: launchedAbility.maxRange,
+    kind: 'arcaneOrb',
+    explosive: true,
+    explosionRadius: launchedAbility.radius,
+    explosionDamage: launchedAbility.damage,
+    maxVerticalOffset: launchedAbility.maxVerticalOffset ?? 2.5,
+    radius: 0.48,
+  });
+
+  // Switch to Barbarian during flight
+  player.replaceRig(rig as never, profileFor('barbarian'));
+
+  // Wire up the exact impact handler from main.ts:
+  // The handler MUST use impact properties, never player.profile.ability!
+  let aoeHits: ProjectileTarget[] = [];
+  pool.update(0.5, [closeEnemy], (impact) => {
+    if (impact.shotKind === 'arcaneOrb') {
+      const radius = impact.explosionRadius ?? 0;
+      const damage = impact.explosionDamage ?? impact.damage;
+      const maxVertical = impact.maxVerticalOffset ?? 2.5;
+      aoeHits = executeExplosionAoE(
+        impact.position,
+        damage,
+        radius,
+        enemies,
+        [],
+        maxVertical,
+        undefined,
+        impact.target,
+      );
+    }
+  });
+
+  // Both close enemy and distant enemy (4m away) must take full 65 damage!
+  assert.equal(aoeHits.length, 2);
+  assert.equal(distantEnemy.health, 100 - 65);
+  assert.equal(closeEnemy.health, 100 - 65);
+});
+
+test('Orb radius affects wall collision (wide orb catches wall edge that thin arrow misses)', () => {
+  // Box obstacle with minX = 1.0, maxX = 5.0, from z = -10.5 to z = -9.5
+  const wall: CameraObstacle = {
+    kind: 'box',
+    minX: 1.0,
+    maxX: 5.0,
+    minZ: -10.5,
+    maxZ: -9.5,
+    bottom: 0,
+    top: 5.0,
+  };
+  const worldWithWall: ProjectileField = { obstacles: [wall], heightAt: () => 0 };
+  const scene = new THREE.Scene();
+  const pool = new ProjectilePool(scene, worldWithWall, { arcaneOrb: dummyOrbVisual() }, 4);
+
+  // Trajectory: passes at x = 0.70 along z -> -20.
+  // Distance to wall minX (1.0) is 0.30m.
+  // 1. Thin arrow (radius 0, padding 0.02): clears the edge, no impact on wall
+  let arrowImpact: Impact | null = null;
+  pool.spawn({
+    origin: new THREE.Vector3(0.70, 1.5, 0),
+    direction: new THREE.Vector3(0, 0, -1),
+    speed: 20,
+    damage: 25,
+    maxRange: 30,
+    kind: 'arrow',
+    radius: 0,
+  });
+  pool.update(0.8, [], (imp) => { arrowImpact = imp; });
+  assert.equal(arrowImpact, null, 'Thin arrow clears the wall edge without colliding');
+
+  pool.clear();
+
+  // 2. Arcane Orb (radius 0.48): reaches x = 0.70 + 0.48 = 1.18 > 1.0, so it collides with the wall!
+  let orbImpact: Impact | null = null;
+  pool.spawn({
+    origin: new THREE.Vector3(0.70, 1.5, 0),
+    direction: new THREE.Vector3(0, 0, -1),
+    speed: 20,
+    damage: 65,
+    maxRange: 30,
+    kind: 'arcaneOrb',
+    radius: 0.48,
+    explosive: true,
+  });
+  pool.update(0.8, [], (imp) => { orbImpact = imp; });
+  assert.ok(orbImpact, 'Arcane Orb collides with wall edge');
+  assert.equal((orbImpact as Impact).kind, 'obstacle');
+  assert.equal((orbImpact as Impact).shotKind, 'arcaneOrb');
+  // Surface position reported should be on the front surface of the wall (z = -9.5)
+  assert.ok(Math.abs((orbImpact as Impact).position.z - (-9.5)) < 0.1, `Surface position near wall front: ${(orbImpact as Impact).position.z}`);
+});
+
+test('Orb radius affects enemy collision (wide orb catches enemy cylinder edge that thin arrow misses)', () => {
+  // Enemy cylinder has radius 0.5. If placed at x = 0.8, z = -10, its boundary is at x = 0.8 - 0.5 = 0.30m.
+  const enemy = makeEnemy(0.8, 0, -10);
+  const scene = new THREE.Scene();
+  const pool = new ProjectilePool(scene, FLAT, { arcaneOrb: dummyOrbVisual() }, 4);
+
+  // Shot fired along x = 0.0 towards z = -20.
+  // Thin arrow at x = 0 misses boundary at x = 0.30m.
+  let arrowImpact: Impact | null = null;
+  pool.spawn({
+    origin: new THREE.Vector3(0, 1.2, 0),
+    direction: new THREE.Vector3(0, 0, -1),
+    speed: 20,
+    damage: 25,
+    maxRange: 30,
+    kind: 'arrow',
+    radius: 0,
+  });
+  pool.update(0.8, [enemy], (imp) => { arrowImpact = imp; });
+  assert.equal(arrowImpact, null, 'Thin arrow misses the enemy cylinder');
+
+  pool.clear();
+
+  // Arcane Orb (radius 0.48): effective reach is 0.0 + 0.48 = 0.48 > 0.30m, so it hits the enemy cylinder!
+  let orbImpact: Impact | null = null;
+  pool.spawn({
+    origin: new THREE.Vector3(0, 1.2, 0),
+    direction: new THREE.Vector3(0, 0, -1),
+    speed: 20,
+    damage: 65,
+    maxRange: 30,
+    kind: 'arcaneOrb',
+    radius: 0.48,
+    explosive: true,
+  });
+  pool.update(0.8, [enemy], (imp) => { orbImpact = imp; });
+  assert.ok(orbImpact, 'Arcane Orb hits the enemy cylinder edge');
+  assert.equal((orbImpact as Impact).kind, 'target');
+  assert.equal((orbImpact as Impact).target, enemy);
+});
+
+test('High-speed movement does not tunnel through thin obstacles', () => {
+  // Thin obstacle wall: thickness 0.10m from z = -10.05 to z = -9.95
+  const thinWall: CameraObstacle = {
+    kind: 'box',
+    minX: -5.0,
+    maxX: 5.0,
+    minZ: -10.05,
+    maxZ: -9.95,
+    bottom: 0,
+    top: 5.0,
+  };
+  const worldWithWall: ProjectileField = { obstacles: [thinWall], heightAt: () => 0 };
+  const scene = new THREE.Scene();
+  const pool = new ProjectilePool(scene, worldWithWall, { arcaneOrb: dummyOrbVisual() }, 4);
+
+  // High speed: 100 m/s with dt = 0.2s travels 20m in a single frame (from z = 0 to z = -20)
+  // A non-swept step would completely tunnel past the 0.1m wall.
+  let reportedImpact: Impact | null = null;
+  pool.spawn({
+    origin: new THREE.Vector3(0, 1.5, 0),
+    direction: new THREE.Vector3(0, 0, -1),
+    speed: 100,
+    damage: 65,
+    maxRange: 50,
+    kind: 'arcaneOrb',
+    radius: 0.48,
+    explosive: true,
+  });
+
+  pool.update(0.2, [], (imp) => { reportedImpact = imp; });
+
+  assert.ok(reportedImpact, 'High-speed orb detected collision');
+  assert.equal((reportedImpact as Impact).kind, 'obstacle');
+  // Swept collision stops at the front face (z = -9.95)
+  assert.ok(Math.abs((reportedImpact as Impact).position.z - (-9.95)) < 0.15, `Impact on wall surface: ${(reportedImpact as Impact).position.z}`);
+});
+
+test('Existing arrow and piercing projectile collision remains unchanged', () => {
+  const scene = new THREE.Scene();
+  const enemy1 = makeEnemy(0, 0, -5);
+  const enemy2 = makeEnemy(0, 0, -10);
+  const pool = new ProjectilePool(scene, FLAT, { arcaneOrb: dummyOrbVisual() }, 4);
+
+  // 1. Normal arrow: default radius 0, non-explosive, stops at first enemy
+  const impacts: Impact[] = [];
+  pool.spawn({
+    origin: new THREE.Vector3(0, 1.2, 0),
+    direction: new THREE.Vector3(0, 0, -1),
+    speed: 30,
+    damage: 25,
+    maxRange: 30,
+    kind: 'arrow',
+  });
+  const slot0 = pool.inspectSlot(0);
+  assert.equal(slot0?.radius, 0);
+  assert.equal(slot0?.explosive, false);
+  assert.equal(slot0?.explosionRadius, 0);
+  assert.equal(slot0?.explosionDamage, 0);
+
+  pool.update(0.5, [enemy1, enemy2], (imp) => impacts.push(imp));
+  assert.equal(impacts.length, 1);
+  assert.equal(impacts[0].target, enemy1);
+  assert.equal(impacts[0].shotKind, 'arrow');
+  assert.equal(impacts[0].explosionRadius, 0);
+  assert.equal(impacts[0].radius, 0);
+
+  pool.clear();
+  impacts.length = 0;
+
+  // 2. Piercing arrow: default radius 0, pierces enemy1 and reaches enemy2
+  pool.spawn({
+    origin: new THREE.Vector3(0, 1.2, 0),
+    direction: new THREE.Vector3(0, 0, -1),
+    speed: 30,
+    damage: 42,
+    maxRange: 30,
+    kind: 'piercingArrow',
+    piercing: true,
+  });
+  const slotPiercing = pool.inspectSlot(0);
+  assert.equal(slotPiercing?.radius, 0);
+  assert.equal(slotPiercing?.piercing, true);
+  assert.equal(slotPiercing?.explosive, false);
+
+  pool.update(0.5, [enemy1, enemy2], (imp) => impacts.push(imp));
+  assert.equal(impacts.length, 2);
+  assert.equal(impacts[0].target, enemy1);
+  assert.equal(impacts[1].target, enemy2);
+  assert.equal(impacts[0].radius, 0);
+  assert.equal(impacts[1].radius, 0);
+});
+
+test('Projectile recycling resets all newly added properties', () => {
+  const scene = new THREE.Scene();
+  const pool = new ProjectilePool(scene, FLAT, { arcaneOrb: dummyOrbVisual() }, 2);
+
+  // Spawn an arcaneOrb with custom explosive snapshot properties
+  pool.spawn({
+    origin: new THREE.Vector3(0, 1.2, 0),
+    direction: new THREE.Vector3(0, 0, -1),
+    speed: 25,
+    damage: 65,
+    maxRange: 30,
+    kind: 'arcaneOrb',
+    explosive: true,
+    explosionRadius: 5.5,
+    explosionDamage: 65,
+    maxVerticalOffset: 2.5,
+    radius: 0.48,
+  });
+
+  const activeSlot = pool.inspectSlot(0);
+  assert.equal(activeSlot?.active, true);
+  assert.equal(activeSlot?.kind, 'arcaneOrb');
+  assert.equal(activeSlot?.explosive, true);
+  assert.equal(activeSlot?.explosionRadius, 5.5);
+  assert.equal(activeSlot?.explosionDamage, 65);
+  assert.equal(activeSlot?.maxVerticalOffset, 2.5);
+  assert.equal(activeSlot?.radius, 0.48);
+
+  // Clear pool (retires all slots)
+  pool.clear();
+
+  const retiredSlot = pool.inspectSlot(0);
+  assert.equal(retiredSlot?.active, false);
+  assert.equal(retiredSlot?.explosive, false);
+  assert.equal(retiredSlot?.explosionRadius, 0);
+  assert.equal(retiredSlot?.explosionDamage, 0);
+  assert.equal(retiredSlot?.maxVerticalOffset, 0);
+  assert.equal(retiredSlot?.radius, 0);
+  assert.equal(retiredSlot?.speed, 0);
+  assert.equal(retiredSlot?.damage, 0);
+  assert.equal(retiredSlot?.travelled, 0);
+  assert.equal(retiredSlot?.maxRange, 0);
+
+  // Now spawn a basic arrow into the recycled slot
+  pool.spawn({
+    origin: new THREE.Vector3(1, 1, 1),
+    direction: new THREE.Vector3(0, 0, -1),
+    speed: 20,
+    damage: 15,
+    maxRange: 20,
+    kind: 'arrow',
+  });
+
+  const reusedSlot = pool.inspectSlot(0);
+  assert.equal(reusedSlot?.active, true);
+  assert.equal(reusedSlot?.kind, 'arrow');
+  assert.equal(reusedSlot?.explosive, false);
+  assert.equal(reusedSlot?.explosionRadius, 0);
+  assert.equal(reusedSlot?.explosionDamage, 0);
+  assert.equal(reusedSlot?.maxVerticalOffset, 0);
+  assert.equal(reusedSlot?.radius, 0);
 });
