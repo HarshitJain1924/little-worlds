@@ -664,8 +664,20 @@ async function boot(): Promise<void> {
       if (dist > range) continue;
       if (dist > 0.001) to.multiplyScalar(1 / dist);
       if (to.dot(forward) >= cosArc && dist < bestDist) {
-        bestDist = dist;
-        bestEnemy = enemy;
+        if (
+          hasLineOfSight(
+            player.position.x,
+            player.position.y + 1.2,
+            player.position.z,
+            enemy.position.x,
+            enemy.position.y + 1.2,
+            enemy.position.z,
+            world.obstacles,
+          )
+        ) {
+          bestDist = dist;
+          bestEnemy = enemy;
+        }
       }
     }
     return bestEnemy;
@@ -674,6 +686,19 @@ async function boot(): Promise<void> {
   player.onAbilityHit = (target, ability) => {
     if (target && typeof target === 'object' && 'takeDamage' in target) {
       const enemy = target as Enemy;
+      if (
+        !hasLineOfSight(
+          player.position.x,
+          player.position.y + 1.2,
+          player.position.z,
+          enemy.position.x,
+          enemy.position.y + 1.2,
+          enemy.position.z,
+          world.obstacles,
+        )
+      ) {
+        return;
+      }
       if (enemy.takeDamage(ability.damage, player.position)) {
         hud.damageNumber(enemy.position, ability.damage, 'dealt');
         effects.spawn(enemy.position, 'heavy');

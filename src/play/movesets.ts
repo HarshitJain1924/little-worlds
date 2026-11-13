@@ -57,6 +57,11 @@ export interface CounterAbilityProfile {
   clip: string;
   duration: number;
   timeScale: number;
+  /**
+   * Hyper-armour: when true, incoming hits during the active strike phase (0.35..0.55s)
+   * do not interrupt or cancel the riposte. Recovery (0.55..1.067s) remains vulnerable
+   * and interruptible by hits.
+   */
   armored?: boolean;
   /** Window during which incoming damage triggers a counter (authored clip seconds). */
   counterStart: number;

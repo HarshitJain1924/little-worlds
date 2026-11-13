@@ -4,7 +4,7 @@ import type { DodgeMotion } from './models';
 import { DODGE_MOTION, findBone } from './models';
 import type { ThirdPersonCamera } from './camera';
 import type { InputController } from './input';
-import { resolveBlockers } from './collision';
+import { hasLineOfSight, resolveBlockers } from './collision';
 import type { World } from './world';
 import { ARENA } from './world';
 import type { AbilityProfile, CounterAbilityProfile, ChargeProfile, CombatProfile } from './movesets';
@@ -343,8 +343,9 @@ export class Player {
     this.charging = false;
     this.chargeTime = 0;
     this.chargeAttack = null;
-    // Active ability visual execution is dropped, but cooldowns persist in this.abilityCooldowns.
+    // Active ability execution and buffered inputs are dropped, but cooldowns persist in this.abilityCooldowns.
     this.interruptAbility();
+    this.abilityBuffer = 0;
     rig.root.position.copy(this.position);
     rig.root.rotation.y = this.yaw;
     // Pose the new model in the state the simulation is already in.
@@ -600,12 +601,17 @@ export class Player {
       return applied;
     }
 
+    // Hyper-armour: heavy swings continue through hits so they are not cancelled
+    // before their strike lands. For an armored ability, hyper-armour protects the
+    // committed active strike phase (0.35..0.55s) from interruption. Recovery
+    // (0.55..1.067s) is post-strike end-lag, so hits interrupt it into Hit_A.
+    const abilityArmored =
+      this.isAbilityActive && Boolean(this.abilityProfile?.armored) && this.abilityPhase === 'active';
+
     if (blocked && guard) {
       this.rig.animator.play(guard.hitClip, { once: true, fade: 0.06, clamp: true });
       this.lockTimer = 0.28;
-    } else if (this.attack?.armored || (this.isAbilityActive && this.abilityProfile?.armored)) {
-      // Hyper-armour: the heavy swing or armored ability continues through the hit,
-      // so it is not cancelled a fraction of a second before its own strike lands.
+    } else if (this.attack?.armored || abilityArmored) {
       this.lockTimer = 0.12;
     } else {
       this.attack = null;
@@ -650,6 +656,7 @@ export class Player {
     this.invulnerable = 0;
     this.lockTarget = null;
     this.interruptAbility();
+    this.abilityBuffer = 0;
     for (const key of Object.keys(this.abilityCooldowns) as CharacterId[]) {
       this.abilityCooldowns[key] = 0;
     }
@@ -853,11 +860,25 @@ export class Player {
       if (isAlive && enemyObj.position) {
         const dist = this.position.distanceTo(enemyObj.position);
         if (dist <= ability.range + 1.2) {
-          target = attacker;
-          const dx = enemyObj.position.x - this.position.x;
-          const dz = enemyObj.position.z - this.position.z;
-          if (dx * dx + dz * dz > 0.001) {
-            this.yaw = Math.atan2(dx, dz);
+          // A wall or obstacle between player and attacker stops the riposte
+          const clear =
+            !this.world.obstacles ||
+            hasLineOfSight(
+              this.position.x,
+              this.position.y + 1.2,
+              this.position.z,
+              enemyObj.position.x,
+              enemyObj.position.y + 1.2,
+              enemyObj.position.z,
+              this.world.obstacles,
+            );
+          if (clear) {
+            target = attacker;
+            const dx = enemyObj.position.x - this.position.x;
+            const dz = enemyObj.position.z - this.position.z;
+            if (dx * dx + dz * dz > 0.001) {
+              this.yaw = Math.atan2(dx, dz);
+            }
           }
         }
       }

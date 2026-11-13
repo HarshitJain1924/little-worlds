@@ -130,12 +130,18 @@ test('Knight cooldown behaviour and persistence across character switches', () =
   player.update(1 / 60, input as never, camera as never);
   assert.ok(player.currentAbilityCooldown > 5.9);
 
-  // Tick 1 second
-  for (let i = 0; i < 60; i += 1) {
+  // During ability execution, switching character must be forbidden
+  assert.equal(player.canSwitchCharacter, false);
+
+  // Advance until ability finishes completely (duration 1.067s, 66 frames @ 60fps = 1.1s)
+  for (let i = 0; i < 66; i += 1) {
     player.update(1 / 60, input as never, camera as never);
   }
-  const cooldownAfter1s = player.currentAbilityCooldown;
-  assert.ok(cooldownAfter1s > 4.8 && cooldownAfter1s < 5.1);
+  assert.equal(player.isAbilityActive, false);
+  assert.equal(player.canSwitchCharacter, true);
+
+  const cooldownAfterFinish = player.currentAbilityCooldown;
+  assert.ok(cooldownAfterFinish > 4.7 && cooldownAfterFinish < 5.0);
 
   // Switch to Ranger
   const rangerRig = makeRig();
@@ -149,13 +155,14 @@ test('Knight cooldown behaviour and persistence across character switches', () =
   }
 
   // Switch back to Knight
+  assert.equal(player.canSwitchCharacter, true);
   const knightRig2 = makeRig();
   player.replaceRig(knightRig2 as never, profileFor('knight'));
   assert.equal(player.profile.id, 'knight');
 
-  // Knight's cooldown continued ticking down while swapped out! (~2.9s left)
+  // Knight's cooldown continued ticking down while swapped out! (~2.8s left)
   const cooldownAfterSwap = player.currentAbilityCooldown;
-  assert.ok(cooldownAfterSwap > 2.8 && cooldownAfterSwap < 3.1);
+  assert.ok(cooldownAfterSwap > 2.7 && cooldownAfterSwap < 3.0);
 
   // Advance remaining time
   for (let i = 0; i < 190; i += 1) {
@@ -341,4 +348,113 @@ test('Existing Knight moveset remains intact', () => {
   player.update(1 / 60, input as never, camera as never);
   assert.equal(player.isAttacking, true);
   assert.equal(player.attackingWith, PROFILES.knight.heavy.clip);
+});
+
+test('abilityBuffer is cleared on replaceRig() and reset()', () => {
+  const { player, camera, input } = createTestEnvironment('knight');
+
+  // Prevent ability from starting immediately by making player airborne
+  (player as unknown as { grounded: boolean }).grounded = false;
+
+  // Press E to queue an ability buffer (0.25s)
+  input.abilityEdge = true;
+  player.update(1 / 60, input as never, camera as never);
+  assert.equal(player.isAbilityActive, false);
+
+  // Switching character must clear the buffered E press
+  player.replaceRig(makeRig() as never, profileFor('barbarian'));
+  (player as unknown as { grounded: boolean }).grounded = true;
+  player.update(1 / 60, input as never, camera as never);
+  assert.equal(player.isAbilityActive, false, 'Stale E buffer must not activate ability after replaceRig');
+
+  // Switch back to Knight and buffer E while airborne again
+  player.replaceRig(makeRig() as never, profileFor('knight'));
+  (player as unknown as { grounded: boolean }).grounded = false;
+  input.abilityEdge = true;
+  player.update(1 / 60, input as never, camera as never);
+  assert.equal(player.isAbilityActive, false);
+
+  // Resetting player must clear the buffered E press
+  player.reset();
+  // Player is grounded after reset, but abilityBuffer is wiped
+  player.update(1 / 60, input as never, camera as never);
+  assert.equal(player.isAbilityActive, false, 'Stale E buffer must not activate ability after reset');
+});
+
+test('Riposte target validation: obstacles block riposte damage through walls', () => {
+  const rig = makeRig();
+  // Solid ruin wall obstacle at z = -1.0
+  const wallObstacle = {
+    kind: 'box' as const,
+    minX: -5,
+    maxX: 5,
+    minZ: -1.2,
+    maxZ: -0.8,
+    bottom: 0,
+    top: 5,
+  };
+  const world = { heightAt: (): number => 0, blockers: [], obstacles: [wallObstacle] };
+  const player = new Player(rig as never, world as never, { x: 0, z: 0 }, profileFor('knight'));
+  const camera = { forward: (out: THREE.Vector3): THREE.Vector3 => out.set(0, 0, -1) };
+  const input = makeInput();
+
+  let riposteTarget: unknown = undefined;
+  player.onAbilityHit = (target) => {
+    riposteTarget = target;
+  };
+
+  input.abilityEdge = true;
+  player.update(1 / 60, input as never, camera as never);
+
+  // Attacker is located behind the wall at z = -2.0
+  const enemyBehindWall = { id: 'archer_behind_wall', alive: true, position: new THREE.Vector3(0, 0, -2.0) };
+
+  // Attacker strikes player during counter window
+  player.takeDamage(20, enemyBehindWall.position, enemyBehindWall);
+  assert.equal(player.isCounterTriggered, true);
+
+  // Advance to riposte hit at 0.47s (~28 frames)
+  for (let i = 0; i < 28; i += 1) player.update(1 / 60, input as never, camera as never);
+
+  // Riposte must NOT target or damage the attacker behind the wall
+  assert.equal(riposteTarget, null, 'Attacker behind wall must not be countered');
+});
+
+test('Hyper-armour behaviour: active strike resists hits while recovery is interruptible', () => {
+  const { rig, player, camera, input } = createTestEnvironment('knight');
+
+  input.abilityEdge = true;
+  player.update(1 / 60, input as never, camera as never);
+
+  // 1. Advance to active strike phase (0.35..0.55s, say at 0.40s = 24 frames)
+  for (let i = 0; i < 24; i += 1) player.update(1 / 60, input as never, camera as never);
+  assert.equal(player.activeAbilityPhase, 'active');
+
+  // Enemy hits player with 15 damage during active riposte phase
+  const enemy1 = { id: 'e1', alive: true, position: new THREE.Vector3(0, 0, -1) };
+  const applied1 = player.takeDamage(15, enemy1.position, enemy1);
+  assert.equal(applied1, 15);
+  assert.equal(player.health, 85);
+  // Hyper-armour protects active strike: ability stays active, Hit_A is not played
+  assert.equal(player.isAbilityActive, true);
+  assert.equal(rig.animator.playing, 'Melee_Block_Attack');
+
+  // Let ability finish and reset
+  for (let i = 0; i < 50; i += 1) player.update(1 / 60, input as never, camera as never);
+  player.reset();
+
+  // 2. Start a fresh ability and advance to recovery phase (0.55..1.067s, say at 0.65s = 39 frames)
+  input.abilityEdge = true;
+  player.update(1 / 60, input as never, camera as never);
+  for (let i = 0; i < 39; i += 1) player.update(1 / 60, input as never, camera as never);
+  assert.equal(player.activeAbilityPhase, 'recovery');
+
+  // Enemy hits player during recovery
+  const enemy2 = { id: 'e2', alive: true, position: new THREE.Vector3(0, 0, -1) };
+  const applied2 = player.takeDamage(15, enemy2.position, enemy2);
+  assert.equal(applied2, 15);
+  assert.equal(player.health, 85);
+  // Recovery has no hyper-armour: ability is interrupted and Hit_A is played
+  assert.equal(player.isAbilityActive, false);
+  assert.equal(rig.animator.playing, 'Hit_A');
 });
