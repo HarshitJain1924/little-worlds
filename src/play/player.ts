@@ -21,6 +21,7 @@ import type {
 } from './movesets';
 import { BOW_RELEASE_SWEEP, profileFor } from './movesets';
 import type { CharacterId } from './roster';
+import type { Impact } from './projectiles';
 
 export type AbilityPhase = 'idle' | 'startup' | 'active' | 'recovery';
 
@@ -143,6 +144,135 @@ export function executeExplosionAoE(
   }
 
   return damagedEnemies;
+}
+
+export interface ProjectileImpactHandlers {
+  spawnNova?: (position: { x: number; y: number; z: number }, radius: number) => void;
+  spawnVfx?: (kind: string, position: { x: number; y: number; z: number }, yaw: number) => void;
+  playNovaSfx?: () => void;
+  playMagicHitSfx?: (heavy: boolean) => void;
+  playArrowHitSfx?: () => void;
+  playPiercingHitSfx?: () => void;
+  playEnemyDeathSfx?: () => void;
+  shakeCamera?: (amount: number) => void;
+  spawnDamageNumber?: (position: { x: number; y: number; z: number }, amount: number) => void;
+  spawnCombatEffect?: (position: { x: number; y: number; z: number }, kind: string) => void;
+  onHitStop?: (duration: number) => void;
+}
+
+export interface ProjectileImpactContext {
+  playerYaw: number;
+  enemies: readonly unknown[];
+  obstacles: readonly CameraObstacle[];
+  handlers?: ProjectileImpactHandlers;
+}
+
+export interface ProjectileImpactResult {
+  handled: boolean;
+  damagedEnemies: Enemy[];
+  impactPosition: { x: number; y: number; z: number };
+  explosionRadius?: number;
+  explosionDamage?: number;
+}
+
+/**
+ * Production impact handler for all projectiles:
+ * - Arcane Nova: applies explosion using the projectile's immutable launch-time properties
+ *   (explosionRadius, explosionDamage, maxVerticalOffset) and corrected contact position,
+ *   never referencing the active character's profile.
+ * - Single-target impacts: applies hit damage and feedback.
+ * - Environmental impacts: wall/ground feedback.
+ */
+export function handleProjectileImpact(
+  impact: Impact,
+  context: ProjectileImpactContext,
+): ProjectileImpactResult {
+  if (impact.shotKind === 'arcaneOrb') {
+    const novaRadius = impact.explosionRadius ?? 5.5;
+    const novaDamage = impact.explosionDamage ?? impact.damage;
+    const maxVertical = impact.maxVerticalOffset ?? 2.5;
+
+    // 1. Large purple magical explosion centered on the contact position
+    context.handlers?.spawnNova?.(impact.position, novaRadius);
+    context.handlers?.spawnVfx?.('impactHeavy', impact.position, context.playerYaw);
+    context.handlers?.playNovaSfx?.();
+    context.handlers?.shakeCamera?.(0.28);
+
+    // 2. Centered AoE damage at contact position
+    const damagedEnemies = executeExplosionAoE(
+      impact.position,
+      novaDamage,
+      novaRadius,
+      context.enemies,
+      context.obstacles,
+      maxVertical,
+      (enemy, dmg) => {
+        context.handlers?.spawnDamageNumber?.(enemy.position, dmg);
+        context.handlers?.spawnCombatEffect?.(enemy.position, 'magicHeavy');
+        context.handlers?.playMagicHitSfx?.(true);
+        context.handlers?.onHitStop?.(0.08);
+        if (!enemy.alive) context.handlers?.playEnemyDeathSfx?.();
+      },
+      impact.target,
+    );
+
+    return {
+      handled: true,
+      damagedEnemies,
+      impactPosition: impact.position,
+      explosionRadius: novaRadius,
+      explosionDamage: novaDamage,
+    };
+  }
+
+  if (impact.kind === 'expired') {
+    return { handled: false, damagedEnemies: [], impactPosition: impact.position };
+  }
+
+  const isMagic = impact.shotKind === 'magicLight' || impact.shotKind === 'magicHeavy';
+  const isHeavy = impact.shotKind === 'magicHeavy';
+  const isPiercing = impact.shotKind === 'piercingArrow';
+
+  if (impact.kind === 'target' && impact.target) {
+    const enemy = impact.target as Enemy;
+    context.handlers?.spawnDamageNumber?.(enemy.position, impact.damage);
+
+    if (isMagic) {
+      context.handlers?.spawnCombatEffect?.(enemy.position, isHeavy ? 'magicHeavy' : 'magic');
+      context.handlers?.spawnVfx?.(isHeavy ? 'impactHeavy' : 'impact', impact.position, context.playerYaw);
+      context.handlers?.playMagicHitSfx?.(isHeavy);
+      context.handlers?.onHitStop?.(isHeavy ? 0.05 : 0.03);
+      context.handlers?.shakeCamera?.(isHeavy ? 0.08 : 0.05);
+    } else if (isPiercing) {
+      context.handlers?.spawnCombatEffect?.(enemy.position, 'heavy');
+      context.handlers?.spawnVfx?.('impactHeavy', impact.position, context.playerYaw);
+      context.handlers?.playPiercingHitSfx?.();
+      context.handlers?.onHitStop?.(0.04);
+      context.handlers?.shakeCamera?.(0.06);
+    } else {
+      context.handlers?.spawnCombatEffect?.(enemy.position, 'hit');
+      context.handlers?.spawnVfx?.('impact', impact.position, context.playerYaw);
+      context.handlers?.playArrowHitSfx?.();
+      context.handlers?.onHitStop?.(0.03);
+      context.handlers?.shakeCamera?.(0.05);
+    }
+
+    if (!enemy.alive) context.handlers?.playEnemyDeathSfx?.();
+    return { handled: true, damagedEnemies: [enemy], impactPosition: impact.position };
+  }
+
+  if (isMagic) {
+    context.handlers?.spawnVfx?.(isHeavy ? 'impactHeavy' : 'impact', impact.position, context.playerYaw);
+    context.handlers?.playMagicHitSfx?.(isHeavy);
+  } else if (isPiercing) {
+    context.handlers?.spawnVfx?.('impactHeavy', impact.position, context.playerYaw);
+    context.handlers?.playArrowHitSfx?.();
+  } else {
+    context.handlers?.spawnVfx?.('impact', impact.position, context.playerYaw);
+    context.handlers?.playArrowHitSfx?.();
+  }
+
+  return { handled: true, damagedEnemies: [], impactPosition: impact.position };
 }
 
 /**

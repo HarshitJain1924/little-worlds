@@ -1,6 +1,12 @@
 import * as THREE from 'three';
 import type { CameraObstacle } from './collision';
-import { nearestObstruction, segmentCylinderEntry } from './collision';
+import {
+  contactPointBox,
+  contactPointCylinder,
+  contactPointGround,
+  segmentBoxEntry,
+  segmentCylinderEntry,
+} from './collision';
 
 /**
  * Pooled arrow projectiles.
@@ -307,22 +313,38 @@ export class ProjectilePool {
         // Piercing arrow: passes through bodies along segment [0, blockT], damaged in entry order.
         // Blockers (obstacles, ground) stop and retire the arrow.
         let blockT = 1;
-        let blockKind: ImpactKind = 'expired';
+        let blockKind: 'obstacle' | 'ground' = 'obstacle';
+        let struckObstacle: CameraObstacle | null = null;
 
         const obstaclePadding = Math.max(0.02, arrow.radius);
-        const obstacleT = nearestObstruction(
-          this.position.x,
-          this.position.y,
-          this.position.z,
-          this.next.x,
-          this.next.y,
-          this.next.z,
-          this.field.obstacles,
-          obstaclePadding,
-        );
-        if (obstacleT < blockT) {
-          blockT = obstacleT;
-          blockKind = 'obstacle';
+        for (const obstacle of this.field.obstacles) {
+          const t =
+            obstacle.kind === 'box'
+              ? segmentBoxEntry(
+                  this.position.x,
+                  this.position.y,
+                  this.position.z,
+                  this.next.x,
+                  this.next.y,
+                  this.next.z,
+                  obstacle,
+                  obstaclePadding,
+                )
+              : segmentCylinderEntry(
+                  this.position.x,
+                  this.position.y,
+                  this.position.z,
+                  this.next.x,
+                  this.next.y,
+                  this.next.z,
+                  obstacle,
+                  obstaclePadding,
+                );
+          if (t < blockT) {
+            blockT = t;
+            blockKind = 'obstacle';
+            struckObstacle = obstacle;
+          }
         }
 
         const ground = this.field.heightAt(this.next.x, this.next.z);
@@ -332,6 +354,7 @@ export class ProjectilePool {
           if (groundT < blockT) {
             blockT = groundT;
             blockKind = 'ground';
+            struckObstacle = null;
           }
         }
 
@@ -344,6 +367,7 @@ export class ProjectilePool {
           this.cylinder.z = target.position.z;
           this.cylinder.bottom = target.position.y + ARROW_BODY.bottom;
           this.cylinder.top = target.position.y + ARROW_BODY.top;
+          this.cylinder.radius = ARROW_BODY.radius;
 
           const targetT = segmentCylinderEntry(
             this.position.x,
@@ -367,6 +391,20 @@ export class ProjectilePool {
         for (const hit of this.targetHits) {
           arrow.hitTargets.add(hit.target);
           this.hitPosition.lerpVectors(this.position, this.next, hit.targetT);
+          if (arrow.radius > 0) {
+            this.cylinder.x = hit.target.position.x;
+            this.cylinder.z = hit.target.position.z;
+            this.cylinder.bottom = hit.target.position.y + ARROW_BODY.bottom;
+            this.cylinder.top = hit.target.position.y + ARROW_BODY.top;
+            this.cylinder.radius = ARROW_BODY.radius;
+            contactPointCylinder(
+              this.hitPosition.x,
+              this.hitPosition.y,
+              this.hitPosition.z,
+              this.cylinder,
+              this.hitPosition,
+            );
+          }
           hit.target.takeDamage(arrow.damage, this.hitPosition);
           onImpact({
             kind: 'target',
@@ -388,9 +426,14 @@ export class ProjectilePool {
           const surfacePosition = this.hitPosition.copy(arrow.tip);
           if (arrow.radius > 0) {
             if (blockKind === 'ground') {
-              surfacePosition.y = ground;
-            } else {
-              surfacePosition.addScaledVector(arrow.direction, arrow.radius);
+              const impactGround = this.field.heightAt(arrow.tip.x, arrow.tip.z);
+              contactPointGround(arrow.tip.x, arrow.tip.z, impactGround, surfacePosition);
+            } else if (struckObstacle) {
+              if (struckObstacle.kind === 'box') {
+                contactPointBox(arrow.tip.x, arrow.tip.y, arrow.tip.z, struckObstacle, surfacePosition);
+              } else {
+                contactPointCylinder(arrow.tip.x, arrow.tip.y, arrow.tip.z, struckObstacle, surfacePosition);
+              }
             }
           }
           const shotKind = arrow.kind;
@@ -425,21 +468,37 @@ export class ProjectilePool {
       let hitT = 1;
       let kind: ImpactKind = 'expired';
       let struck: ProjectileTarget | null = null;
+      let struckObstacle: CameraObstacle | null = null;
 
       const obstaclePadding = Math.max(0.02, arrow.radius);
-      const obstacleT = nearestObstruction(
-        this.position.x,
-        this.position.y,
-        this.position.z,
-        this.next.x,
-        this.next.y,
-        this.next.z,
-        this.field.obstacles,
-        obstaclePadding,
-      );
-      if (obstacleT < hitT) {
-        hitT = obstacleT;
-        kind = 'obstacle';
+      for (const obstacle of this.field.obstacles) {
+        const t =
+          obstacle.kind === 'box'
+            ? segmentBoxEntry(
+                this.position.x,
+                this.position.y,
+                this.position.z,
+                this.next.x,
+                this.next.y,
+                this.next.z,
+                obstacle,
+                obstaclePadding,
+              )
+            : segmentCylinderEntry(
+                this.position.x,
+                this.position.y,
+                this.position.z,
+                this.next.x,
+                this.next.y,
+                this.next.z,
+                obstacle,
+                obstaclePadding,
+              );
+        if (t < hitT) {
+          hitT = t;
+          kind = 'obstacle';
+          struckObstacle = obstacle;
+        }
       }
 
       for (const target of targets) {
@@ -449,6 +508,7 @@ export class ProjectilePool {
         this.cylinder.z = target.position.z;
         this.cylinder.bottom = target.position.y + ARROW_BODY.bottom;
         this.cylinder.top = target.position.y + ARROW_BODY.top;
+        this.cylinder.radius = ARROW_BODY.radius;
 
         const targetT = segmentCylinderEntry(
           this.position.x,
@@ -465,6 +525,7 @@ export class ProjectilePool {
           hitT = targetT;
           kind = 'target';
           struck = target;
+          struckObstacle = null;
         }
       }
 
@@ -476,6 +537,7 @@ export class ProjectilePool {
           hitT = groundT;
           kind = 'ground';
           struck = null;
+          struckObstacle = null;
         }
       }
 
@@ -492,9 +554,21 @@ export class ProjectilePool {
         const surfacePosition = this.hitPosition.copy(arrow.tip);
         if (arrow.radius > 0) {
           if (kind === 'ground') {
-            surfacePosition.y = ground;
-          } else {
-            surfacePosition.addScaledVector(arrow.direction, arrow.radius);
+            const impactGround = this.field.heightAt(arrow.tip.x, arrow.tip.z);
+            contactPointGround(arrow.tip.x, arrow.tip.z, impactGround, surfacePosition);
+          } else if (kind === 'obstacle' && struckObstacle) {
+            if (struckObstacle.kind === 'box') {
+              contactPointBox(arrow.tip.x, arrow.tip.y, arrow.tip.z, struckObstacle, surfacePosition);
+            } else {
+              contactPointCylinder(arrow.tip.x, arrow.tip.y, arrow.tip.z, struckObstacle, surfacePosition);
+            }
+          } else if (kind === 'target' && struck) {
+            this.cylinder.x = struck.position.x;
+            this.cylinder.z = struck.position.z;
+            this.cylinder.bottom = struck.position.y + ARROW_BODY.bottom;
+            this.cylinder.top = struck.position.y + ARROW_BODY.top;
+            this.cylinder.radius = ARROW_BODY.radius;
+            contactPointCylinder(arrow.tip.x, arrow.tip.y, arrow.tip.z, this.cylinder, surfacePosition);
           }
         }
 

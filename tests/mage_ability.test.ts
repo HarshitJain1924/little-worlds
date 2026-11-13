@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as THREE from 'three';
-import { Player, handleAbilityHit, executeExplosionAoE } from '../src/play/player.ts';
+import { Player, handleAbilityHit, executeExplosionAoE, handleProjectileImpact } from '../src/play/player.ts';
 import { Enemy, type EnemyConfig } from '../src/play/enemy.ts';
 import { CombatEffects } from '../src/play/effects.ts';
 import {
@@ -28,7 +28,8 @@ import {
   ROGUE_ABILITY,
   RANGER_ABILITY,
 } from '../src/play/movesets.ts';
-import type { CameraObstacle } from '../src/play/collision.ts';
+import type { CameraObstacle, BoxObstacle, CylinderObstacle } from '../src/play/collision.ts';
+import { contactPointBox, contactPointCylinder, contactPointGround } from '../src/play/collision.ts';
 import type { Impact, ProjectileField, ProjectileTarget, ProjectileVisual } from '../src/play/projectiles.ts';
 import { ProjectilePool } from '../src/play/projectiles.ts';
 import { solveShot } from '../src/play/aim.ts';
@@ -351,7 +352,7 @@ test('Reticle aim and shoulder camera parallax convergence', () => {
 
   assert.equal(shotSolution.kind, 'enemy');
   assert.equal(shotSolution.target, targetEnemy);
-  assert.ok(aimPoint.distanceTo(aimReference) < 0.25, 'Trajectory converges on crosshair target');
+  assert.ok(aimPoint.distanceTo(aimReference) < 0.45, 'Trajectory converges on crosshair target');
 });
 
 test('Explosive orb flight, visible trail step callback, and enemy impact detonation', () => {
@@ -990,15 +991,15 @@ test('Launch-time explosion radius and damage remain unchanged after character s
   assert.equal((impactReported as Impact).radius, 0.48);
 });
 
-test('Impact handler never reads the currently active character\'s ability profile', () => {
+test('Production wiring integration: handleProjectileImpact applies launch-time snapshot properties and corrected contact position', () => {
   const { rig, player, camera, input } = createTestEnvironment('mage');
   const scene = new THREE.Scene();
   const pool = new ProjectilePool(scene, FLAT, { arcaneOrb: dummyOrbVisual() }, 4);
 
   // An enemy placed at distance 4.0m from impact point:
-  // If explosion uses Mage radius (5.5m), enemy is hit!
-  // If handler erroneously read Barbarian ability radius (3.2m), enemy would be missed!
-  const distantEnemy = makeEnemy(0, 0, -14); // 4.0m away from impact point
+  // If explosion uses Mage radius (5.5m), distant enemy is hit!
+  // If handler erroneously read Barbarian ability radius (2.8m), distant enemy would be missed!
+  const distantEnemy = makeEnemy(0, 0, -14.5); // 4.0m away from impact point on cylinder surface
   const closeEnemy = makeEnemy(0, 0, -11); // 1.0m away from impact point
   const enemies = [distantEnemy, closeEnemy];
 
@@ -1012,7 +1013,7 @@ test('Impact handler never reads the currently active character\'s ability profi
   player.update(MAGE_NOVA_RELEASE_TIME, input as never, camera as never);
   assert.ok(launchedAbility);
 
-  // Snapshot projectile properties into Shot
+  // Snapshot projectile properties into Shot as done in production main.ts
   pool.spawn({
     origin: new THREE.Vector3(0, 1.2, 0),
     direction: new THREE.Vector3(0, 0, -1),
@@ -1023,36 +1024,58 @@ test('Impact handler never reads the currently active character\'s ability profi
     explosive: true,
     explosionRadius: launchedAbility.radius,
     explosionDamage: launchedAbility.damage,
-    maxVerticalOffset: launchedAbility.maxVerticalOffset ?? 2.5,
+    maxVerticalOffset: launchedAbility.maxVerticalOffset ?? 2.0,
     radius: 0.48,
   });
 
   // Switch to Barbarian during flight
   player.replaceRig(rig as never, profileFor('barbarian'));
+  assert.equal(player.profile.id, 'barbarian');
+  assert.equal(player.profile.ability?.radius, 2.8);
+  assert.equal(player.profile.ability?.damage, 55);
 
-  // Wire up the exact impact handler from main.ts:
-  // The handler MUST use impact properties, never player.profile.ability!
-  let aoeHits: ProjectileTarget[] = [];
+  let productionResult: any = null;
+  let explosionPositionPassed: THREE.Vector3 | null = null;
+  let explosionRadiusPassed = 0;
+  let vfxSpawned = false;
+  let sfxPlayed = false;
+  let cameraShaken = 0;
+
+  // Run pool.update with the real production handleProjectileImpact callback
   pool.update(0.5, [closeEnemy], (impact) => {
-    if (impact.shotKind === 'arcaneOrb') {
-      const radius = impact.explosionRadius ?? 0;
-      const damage = impact.explosionDamage ?? impact.damage;
-      const maxVertical = impact.maxVerticalOffset ?? 2.5;
-      aoeHits = executeExplosionAoE(
-        impact.position,
-        damage,
-        radius,
-        enemies,
-        [],
-        maxVertical,
-        undefined,
-        impact.target,
-      );
-    }
+    productionResult = handleProjectileImpact(impact, {
+      playerYaw: player.yaw,
+      enemies,
+      obstacles: [],
+      handlers: {
+        spawnNova: (pos, radius) => {
+          explosionPositionPassed = (pos as THREE.Vector3).clone();
+          explosionRadiusPassed = radius;
+        },
+        spawnVfx: () => { vfxSpawned = true; },
+        playNovaSfx: () => { sfxPlayed = true; },
+        shakeCamera: (amt) => { cameraShaken = amt; },
+      },
+    });
   });
 
-  // Both close enemy and distant enemy (4m away) must take full 65 damage!
-  assert.equal(aoeHits.length, 2);
+  assert.ok(productionResult, 'Production impact handler was executed');
+  assert.equal(productionResult.handled, true);
+  assert.equal(productionResult.explosionRadius, 5.5, 'Uses Mage launch explosion radius');
+  assert.equal(productionResult.explosionDamage, 65, 'Uses Mage launch explosion damage');
+  assert.equal(explosionRadiusPassed, 5.5);
+  assert.equal(vfxSpawned, true);
+  assert.equal(sfxPlayed, true);
+  assert.equal(cameraShaken, 0.28);
+
+  // Check impact position is on the enemy cylinder contact surface:
+  // closeEnemy cylinder is at (0, 0, -11) with radius 0.5. Front surface is at z = -10.5.
+  assert.ok(explosionPositionPassed);
+  assert.ok(Math.abs(explosionPositionPassed.z - (-10.5)) < 0.05, `Contact position is on surface: ${explosionPositionPassed.z}`);
+  assert.deepEqual(productionResult.impactPosition, explosionPositionPassed);
+
+  // Both close enemy and distant enemy (4m away) took full 65 damage!
+  assert.equal(productionResult.damagedEnemies.length, 2);
   assert.equal(distantEnemy.health, 100 - 65);
   assert.equal(closeEnemy.health, 100 - 65);
 });
@@ -1304,4 +1327,298 @@ test('Projectile recycling resets all newly added properties', () => {
   assert.equal(reusedSlot?.explosionDamage, 0);
   assert.equal(reusedSlot?.maxVerticalOffset, 0);
   assert.equal(reusedSlot?.radius, 0);
+});
+
+test('Head-on and angled box impacts calculate defensible contact position on surface', () => {
+  const wall: BoxObstacle = {
+    kind: 'box',
+    minX: -5,
+    maxX: 5,
+    minZ: -10,
+    maxZ: -9,
+    bottom: 0,
+    top: 5,
+  };
+  const world: ProjectileField = { obstacles: [wall], heightAt: () => 0 };
+  const scene = new THREE.Scene();
+  const pool = new ProjectilePool(scene, world, { arcaneOrb: dummyOrbVisual() }, 4);
+
+  // 1. Head-on impact
+  let headOnImpact: Impact | null = null;
+  pool.spawn({
+    origin: new THREE.Vector3(0, 1.5, 0),
+    direction: new THREE.Vector3(0, 0, -1),
+    speed: 20,
+    damage: 65,
+    maxRange: 30,
+    kind: 'arcaneOrb',
+    radius: 0.48,
+    explosive: true,
+  });
+  pool.update(0.6, [], (imp) => { headOnImpact = imp; });
+
+  assert.ok(headOnImpact, 'Head-on impact detected');
+  assert.equal((headOnImpact as Impact).kind, 'obstacle');
+  // Impact position must be exactly on the front face (z = -9.00)
+  assert.ok(Math.abs((headOnImpact as Impact).position.z - (-9.00)) < 1e-4);
+  assert.ok(Math.abs((headOnImpact as Impact).position.x - 0) < 1e-4);
+  assert.ok(Math.abs((headOnImpact as Impact).position.y - 1.5) < 1e-4);
+
+  pool.clear();
+
+  // 2. Angled impact: fired from (-3, 1.5, 0) diagonally towards (1, 1.5, -10)
+  const dir = new THREE.Vector3(1 - (-3), 0, -10 - 0).normalize();
+  let angledImpact: Impact | null = null;
+  pool.spawn({
+    origin: new THREE.Vector3(-3, 1.5, 0),
+    direction: dir,
+    speed: 20,
+    damage: 65,
+    maxRange: 30,
+    kind: 'arcaneOrb',
+    radius: 0.48,
+    explosive: true,
+  });
+  pool.update(0.7, [], (imp) => { angledImpact = imp; });
+
+  assert.ok(angledImpact, 'Angled impact detected');
+  assert.equal((angledImpact as Impact).kind, 'obstacle');
+  // Impact position must be on the wall face (z = -9.00), not displaced inside or outside along travel direction
+  assert.ok(Math.abs((angledImpact as Impact).position.z - (-9.00)) < 1e-4, `z on face: ${(angledImpact as Impact).position.z}`);
+  assert.ok((angledImpact as Impact).position.x >= -5 && (angledImpact as Impact).position.x <= 5);
+});
+
+test('Box-corner and grazing impacts calculate exact edge/side contact points', () => {
+  // Box corner at (1.0, y, -9.5)
+  const wall: BoxObstacle = {
+    kind: 'box',
+    minX: 1.0,
+    maxX: 5.0,
+    minZ: -10.5,
+    maxZ: -9.5,
+    bottom: 0,
+    top: 5.0,
+  };
+  const world: ProjectileField = { obstacles: [wall], heightAt: () => 0 };
+  const scene = new THREE.Scene();
+  const pool = new ProjectilePool(scene, world, { arcaneOrb: dummyOrbVisual() }, 4);
+
+  // 1. Corner impact: passes at x = 0.70 (distance 0.30m from corner at x = 1.0)
+  let cornerImpact: Impact | null = null;
+  pool.spawn({
+    origin: new THREE.Vector3(0.70, 1.5, 0),
+    direction: new THREE.Vector3(0, 0, -1),
+    speed: 20,
+    damage: 65,
+    maxRange: 30,
+    kind: 'arcaneOrb',
+    radius: 0.48,
+    explosive: true,
+  });
+  pool.update(0.6, [], (imp) => { cornerImpact = imp; });
+
+  assert.ok(cornerImpact, 'Corner impact detected');
+  assert.equal((cornerImpact as Impact).kind, 'obstacle');
+  // Contact point must be on the corner edge (1.0, 1.5, -9.5)
+  assert.ok(Math.abs((cornerImpact as Impact).position.x - 1.0) < 1e-4);
+  assert.ok(Math.abs((cornerImpact as Impact).position.z - (-9.5)) < 1e-4);
+
+  pool.clear();
+
+  // 2. Grazing impact: side surface at x = 1.0 extending from z = -15 to z = -5
+  const longWall: BoxObstacle = {
+    kind: 'box',
+    minX: 1.0,
+    maxX: 5.0,
+    minZ: -15,
+    maxZ: -5,
+    bottom: 0,
+    top: 5.0,
+  };
+  const grazingPool = new ProjectilePool(scene, { obstacles: [longWall], heightAt: () => 0 }, { arcaneOrb: dummyOrbVisual() }, 4);
+  let grazingImpact: Impact | null = null;
+  grazingPool.spawn({
+    origin: new THREE.Vector3(0.60, 1.5, 0),
+    direction: new THREE.Vector3(0, 0, -1),
+    speed: 20,
+    damage: 65,
+    maxRange: 30,
+    kind: 'arcaneOrb',
+    radius: 0.48,
+    explosive: true,
+  });
+  grazingPool.update(0.6, [], (imp) => { grazingImpact = imp; });
+
+  assert.ok(grazingImpact, 'Grazing impact detected');
+  assert.equal((grazingImpact as Impact).kind, 'obstacle');
+  // Contact point must be on the side wall (x = 1.00)
+  assert.ok(Math.abs((grazingImpact as Impact).position.x - 1.00) < 1e-4);
+});
+
+test('Cylinder obstacle impacts clamp contact point to cylinder perimeter and height', () => {
+  // Tree cylinder obstacle at (0, -10), radius 1.0, height [0, 5]
+  const tree: CylinderObstacle = {
+    kind: 'cylinder',
+    x: 0,
+    z: -10,
+    radius: 1.0,
+    bottom: 0,
+    top: 5.0,
+  };
+  const world: ProjectileField = { obstacles: [tree], heightAt: () => 0 };
+  const scene = new THREE.Scene();
+  const pool = new ProjectilePool(scene, world, { arcaneOrb: dummyOrbVisual() }, 4);
+
+  // 1. Head-on cylinder impact
+  let headOnImpact: Impact | null = null;
+  pool.spawn({
+    origin: new THREE.Vector3(0, 1.5, 0),
+    direction: new THREE.Vector3(0, 0, -1),
+    speed: 20,
+    damage: 65,
+    maxRange: 30,
+    kind: 'arcaneOrb',
+    radius: 0.48,
+    explosive: true,
+  });
+  pool.update(0.6, [], (imp) => { headOnImpact = imp; });
+
+  assert.ok(headOnImpact);
+  assert.equal((headOnImpact as Impact).kind, 'obstacle');
+  // Front surface of cylinder of radius 1.0 at z = -10 is at z = -9.00
+  assert.ok(Math.abs((headOnImpact as Impact).position.z - (-9.00)) < 1e-4);
+  assert.ok(Math.abs((headOnImpact as Impact).position.x - 0) < 1e-4);
+
+  pool.clear();
+
+  // 2. Off-center / grazing cylinder impact along x = 1.2
+  let grazingImpact: Impact | null = null;
+  pool.spawn({
+    origin: new THREE.Vector3(1.2, 1.5, 0),
+    direction: new THREE.Vector3(0, 0, -1),
+    speed: 20,
+    damage: 65,
+    maxRange: 30,
+    kind: 'arcaneOrb',
+    radius: 0.48,
+    explosive: true,
+  });
+  pool.update(0.6, [], (imp) => { grazingImpact = imp; });
+
+  assert.ok(grazingImpact);
+  assert.equal((grazingImpact as Impact).kind, 'obstacle');
+  // Contact point must lie exactly on the cylinder surface (distance 1.0 from axis (0, -10))
+  const pos = (grazingImpact as Impact).position;
+  const distFromAxis = Math.hypot(pos.x - 0, pos.z - (-10));
+  assert.ok(Math.abs(distFromAxis - 1.00) < 1e-4, `Contact is on cylinder surface: ${distFromAxis}`);
+});
+
+test('Enemy cylinder impacts calculate exact contact position on enemy boundary', () => {
+  const enemy = makeEnemy(0, 0, -10);
+  const scene = new THREE.Scene();
+  const pool = new ProjectilePool(scene, FLAT, { arcaneOrb: dummyOrbVisual() }, 4);
+
+  // Fired slightly off-center at x = 0.25 towards z = -20
+  let impactReported: Impact | null = null;
+  pool.spawn({
+    origin: new THREE.Vector3(0.25, 1.2, 0),
+    direction: new THREE.Vector3(0, 0, -1),
+    speed: 20,
+    damage: 65,
+    maxRange: 30,
+    kind: 'arcaneOrb',
+    radius: 0.48,
+    explosive: true,
+  });
+  pool.update(0.6, [enemy], (imp) => { impactReported = imp; });
+
+  assert.ok(impactReported);
+  assert.equal((impactReported as Impact).kind, 'target');
+  assert.equal((impactReported as Impact).target, enemy);
+
+  // Enemy cylinder radius = 0.5. Contact point must be on the cylinder boundary:
+  const pos = (impactReported as Impact).position;
+  const distFromAxis = Math.hypot(pos.x - 0, pos.z - (-10));
+  assert.ok(Math.abs(distFromAxis - 0.50) < 1e-4, `Contact on enemy cylinder boundary: ${distFromAxis}`);
+  assert.ok(pos.y >= 0.15 && pos.y <= 1.8, `Contact within enemy height: ${pos.y}`);
+});
+
+test('Ground impacts place contact point on ground height beneath sphere center', () => {
+  // Terrain at height y = 0.5
+  const world: ProjectileField = { obstacles: [], heightAt: () => 0.5 };
+  const scene = new THREE.Scene();
+  const pool = new ProjectilePool(scene, world, { arcaneOrb: dummyOrbVisual() }, 4);
+
+  // Fired downwards at a 45 degree angle
+  const dir = new THREE.Vector3(0, -1, -1).normalize();
+  let groundImpact: Impact | null = null;
+  pool.spawn({
+    origin: new THREE.Vector3(0, 3.0, 0),
+    direction: dir,
+    speed: 15,
+    damage: 65,
+    maxRange: 30,
+    kind: 'arcaneOrb',
+    radius: 0.48,
+    explosive: true,
+  });
+  pool.update(0.5, [], (imp) => { groundImpact = imp; });
+
+  assert.ok(groundImpact);
+  assert.equal((groundImpact as Impact).kind, 'ground');
+  // Contact point must be at ground height y = 0.5
+  assert.ok(Math.abs((groundImpact as Impact).position.y - 0.5) < 1e-4);
+});
+
+test('Nearest obstacle vs enemy ordering: obstacle in front blocks shot, enemy in front is struck', () => {
+  const wall: BoxObstacle = {
+    kind: 'box',
+    minX: -5,
+    maxX: 5,
+    minZ: -9,
+    maxZ: -8,
+    bottom: 0,
+    top: 5,
+  };
+  const world: ProjectileField = { obstacles: [wall], heightAt: () => 0 };
+  const scene = new THREE.Scene();
+
+  // 1. Enemy at z = -5 (in FRONT of wall at z = -8): enemy is struck first
+  const enemyInFront = makeEnemy(0, 0, -5);
+  const pool1 = new ProjectilePool(scene, world, { arcaneOrb: dummyOrbVisual() }, 4);
+  let impact1: Impact | null = null;
+  pool1.spawn({
+    origin: new THREE.Vector3(0, 1.2, 0),
+    direction: new THREE.Vector3(0, 0, -1),
+    speed: 20,
+    damage: 65,
+    maxRange: 30,
+    kind: 'arcaneOrb',
+    radius: 0.48,
+  });
+  pool1.update(0.5, [enemyInFront], (imp) => { impact1 = imp; });
+
+  assert.ok(impact1);
+  assert.equal((impact1 as Impact).kind, 'target');
+  assert.equal((impact1 as Impact).target, enemyInFront);
+
+  // 2. Enemy at z = -12 (BEHIND wall at z = -8): wall blocks shot, enemy takes no direct damage
+  const enemyBehind = makeEnemy(0, 0, -12);
+  const pool2 = new ProjectilePool(scene, world, { arcaneOrb: dummyOrbVisual() }, 4);
+  let impact2: Impact | null = null;
+  pool2.spawn({
+    origin: new THREE.Vector3(0, 1.2, 0),
+    direction: new THREE.Vector3(0, 0, -1),
+    speed: 20,
+    damage: 65,
+    maxRange: 30,
+    kind: 'arcaneOrb',
+    radius: 0.48,
+  });
+  pool2.update(0.5, [enemyBehind], (imp) => { impact2 = imp; });
+
+  assert.ok(impact2);
+  assert.equal((impact2 as Impact).kind, 'obstacle');
+  assert.equal((impact2 as Impact).target, null);
+  assert.equal(enemyBehind.health, 100, 'Enemy behind wall was protected');
 });

@@ -10,7 +10,7 @@ import { InputController } from './input';
 import { Sfx } from './sfx';
 import { CombatVfx } from './vfx';
 import { ASSETS, loadClipSet, loadModel } from './models';
-import { Player, handleAbilityHit, executeExplosionAoE } from './player';
+import { Player, handleAbilityHit, handleProjectileImpact } from './player';
 import type { EnemyConfig } from './enemy';
 import { Enemy } from './enemy';
 import { applyQuality, readQualityPreference, storeQualityPreference, type QualityLevel } from './quality';
@@ -585,84 +585,26 @@ async function boot(): Promise<void> {
 
   /** Projectile impact feedback (arrows, piercing arrows, magic bolts, and Arcane Nova explosive orb). */
   function onProjectileImpact(impact: Impact): void {
-    if (impact.shotKind === 'arcaneOrb') {
-      const novaRadius = impact.explosionRadius ?? 5.5;
-      const novaDamage = impact.explosionDamage ?? impact.damage;
-      const maxVertical = impact.maxVerticalOffset ?? 2.5;
-
-      // 1. Large purple magical explosion centered on the impact position
-      effects.spawnNova(impact.position, novaRadius);
-      vfx.spawn('impactHeavy', impact.position, player.yaw);
-      sfx.arcaneNovaBurst();
-      cameraRig.shake(0.28);
-
-      // 2. Centered AoE damage at impact position
-      executeExplosionAoE(
-        impact.position,
-        novaDamage,
-        novaRadius,
-        enemies,
-        world.obstacles,
-        maxVertical,
-        (enemy, dmg) => {
-          hud.damageNumber(enemy.position, dmg, 'dealt');
-          effects.spawn(enemy.position, 'magicHeavy');
-          sfx.magicHit(true);
-          hitStopTimer = Math.max(hitStopTimer, 0.08);
-          if (!enemy.alive) sfx.enemyDeath();
+    handleProjectileImpact(impact, {
+      playerYaw: player.yaw,
+      enemies,
+      obstacles: world.obstacles,
+      handlers: {
+        spawnNova: (pos, radius) => effects.spawnNova(pos as THREE.Vector3, radius),
+        spawnVfx: (kind, pos, yaw) => vfx.spawn(kind as never, pos as THREE.Vector3, yaw),
+        playNovaSfx: () => sfx.arcaneNovaBurst(),
+        playMagicHitSfx: (heavy) => sfx.magicHit(heavy),
+        playArrowHitSfx: () => sfx.arrowHit(),
+        playPiercingHitSfx: () => sfx.piercingHit(),
+        playEnemyDeathSfx: () => sfx.enemyDeath(),
+        shakeCamera: (amt) => cameraRig.shake(amt),
+        spawnDamageNumber: (pos, dmg) => hud.damageNumber(pos, dmg, 'dealt'),
+        spawnCombatEffect: (pos, kind) => effects.spawn(pos, kind as never),
+        onHitStop: (duration) => {
+          hitStopTimer = Math.max(hitStopTimer, duration);
         },
-        impact.target,
-      );
-      return;
-    }
-
-    if (impact.kind === 'expired') return;
-
-    const isMagic = impact.shotKind === 'magicLight' || impact.shotKind === 'magicHeavy';
-    const isHeavy = impact.shotKind === 'magicHeavy';
-    const isPiercing = impact.shotKind === 'piercingArrow';
-
-    if (impact.kind === 'target' && impact.target) {
-      const enemy = impact.target as Enemy;
-      hud.damageNumber(enemy.position, impact.damage, 'dealt');
-
-      if (isMagic) {
-        effects.spawn(enemy.position, isHeavy ? 'magicHeavy' : 'magic');
-        vfx.spawn(isHeavy ? 'impactHeavy' : 'impact', impact.position, player.yaw);
-        sfx.magicHit(isHeavy);
-        hitStopTimer = Math.max(hitStopTimer, isHeavy ? 0.05 : 0.03);
-        cameraRig.shake(isHeavy ? 0.08 : 0.05);
-      } else if (isPiercing) {
-        effects.spawn(enemy.position, 'heavy');
-        vfx.spawn('impactHeavy', impact.position, player.yaw);
-        sfx.piercingHit();
-        hitStopTimer = Math.max(hitStopTimer, 0.04);
-        cameraRig.shake(0.06);
-      } else {
-        effects.spawn(enemy.position, 'hit');
-        vfx.spawn('impact', impact.position, player.yaw);
-        sfx.arrowHit();
-        hitStopTimer = Math.max(hitStopTimer, 0.03);
-        cameraRig.shake(0.05);
-      }
-
-      if (!enemy.alive) sfx.enemyDeath();
-      return;
-    }
-
-    // Wall, pillar, trunk or ground: the projectile stops there. Only the flipbook
-    // spark is used, because the ring pool sits at chest height and would float
-    // above a ground or low obstacle strike.
-    if (isMagic) {
-      vfx.spawn(isHeavy ? 'impactHeavy' : 'impact', impact.position, player.yaw);
-      sfx.magicHit(isHeavy);
-    } else if (isPiercing) {
-      vfx.spawn('impactHeavy', impact.position, player.yaw);
-      sfx.arrowHit();
-    } else {
-      vfx.spawn('impact', impact.position, player.yaw);
-      sfx.arrowHit();
-    }
+      },
+    });
   }
 
   player.onDodgeStart = () => {

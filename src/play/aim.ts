@@ -1,5 +1,12 @@
 import * as THREE from 'three';
-import { nearestObstruction, segmentCylinderEntry } from './collision';
+import type { CameraObstacle } from './collision';
+import {
+  contactPointBox,
+  contactPointCylinder,
+  contactPointGround,
+  segmentBoxEntry,
+  segmentCylinderEntry,
+} from './collision';
 import type { ProjectileField, ProjectileTarget } from './projectiles';
 import { ARROW_BODY } from './projectiles';
 
@@ -58,21 +65,23 @@ export function solveShot(
   let hitT = 1;
   let kind: AimKind = 'range';
   let struck: ProjectileTarget | null = null;
+  let struckObstacle: CameraObstacle | null = null;
+
+  const toX = origin.x + direction.x * maxRange;
+  const toY = origin.y + direction.y * maxRange;
+  const toZ = origin.z + direction.z * maxRange;
 
   const obstaclePadding = Math.max(0.02, radius);
-  const obstacleT = nearestObstruction(
-    origin.x,
-    origin.y,
-    origin.z,
-    origin.x + direction.x * maxRange,
-    origin.y + direction.y * maxRange,
-    origin.z + direction.z * maxRange,
-    field.obstacles,
-    obstaclePadding,
-  );
-  if (obstacleT < hitT) {
-    hitT = obstacleT;
-    kind = 'obstacle';
+  for (const obstacle of field.obstacles) {
+    const t =
+      obstacle.kind === 'box'
+        ? segmentBoxEntry(origin.x, origin.y, origin.z, toX, toY, toZ, obstacle, obstaclePadding)
+        : segmentCylinderEntry(origin.x, origin.y, origin.z, toX, toY, toZ, obstacle, obstaclePadding);
+    if (t < hitT) {
+      hitT = t;
+      kind = 'obstacle';
+      struckObstacle = obstacle;
+    }
   }
 
   for (const target of targets) {
@@ -82,14 +91,15 @@ export function solveShot(
     cylinder.z = target.position.z;
     cylinder.bottom = target.position.y + ARROW_BODY.bottom;
     cylinder.top = target.position.y + ARROW_BODY.top;
+    cylinder.radius = ARROW_BODY.radius;
 
     const targetT = segmentCylinderEntry(
       origin.x,
       origin.y,
       origin.z,
-      origin.x + direction.x * maxRange,
-      origin.y + direction.y * maxRange,
-      origin.z + direction.z * maxRange,
+      toX,
+      toY,
+      toZ,
       cylinder,
       radius,
     );
@@ -98,6 +108,7 @@ export function solveShot(
       hitT = targetT;
       kind = 'enemy';
       struck = target;
+      struckObstacle = null;
     }
   }
 
@@ -127,6 +138,7 @@ export function solveShot(
         hitT = groundT;
         kind = 'ground';
         struck = null;
+        struckObstacle = null;
       }
       break;
     }
@@ -136,9 +148,21 @@ export function solveShot(
   out.copy(origin).addScaledVector(direction, distance);
   if (radius > 0 && kind !== 'range') {
     if (kind === 'ground') {
-      out.y = field.heightAt(out.x, out.z);
-    } else {
-      out.addScaledVector(direction, radius);
+      const groundY = field.heightAt(out.x, out.z);
+      contactPointGround(out.x, out.z, groundY, out);
+    } else if (kind === 'obstacle' && struckObstacle) {
+      if (struckObstacle.kind === 'box') {
+        contactPointBox(out.x, out.y, out.z, struckObstacle, out);
+      } else {
+        contactPointCylinder(out.x, out.y, out.z, struckObstacle, out);
+      }
+    } else if (kind === 'enemy' && struck) {
+      cylinder.x = struck.position.x;
+      cylinder.z = struck.position.z;
+      cylinder.bottom = struck.position.y + ARROW_BODY.bottom;
+      cylinder.top = struck.position.y + ARROW_BODY.top;
+      cylinder.radius = ARROW_BODY.radius;
+      contactPointCylinder(out.x, out.y, out.z, cylinder, out);
     }
   }
 
