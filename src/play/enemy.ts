@@ -53,6 +53,7 @@ export class Enemy {
   private cooldown = 0;
   private hurtTimer = 0;
   private attackLanded = false;
+  private attackImpactPending = false;
   private speed = 0;
   private readonly world: World;
 
@@ -128,6 +129,7 @@ export class Enemy {
             this.state = 'attack';
             this.stateTimer = 0;
             this.attackLanded = false;
+            this.attackImpactPending = false;
             this.rig.animator.play(this.config.attackClip ?? DEFAULT_ATTACK_CLIP, {
               once: true,
               fade: 0.1,
@@ -160,33 +162,14 @@ export class Enemy {
 
           if (!this.attackLanded && this.stateTimer >= strikeAt) {
             this.attackLanded = true;
-            // Re-check range and frontal arc at impact, not at windup.
-            const forwardX = Math.sin(this.yaw);
-            const forwardZ = Math.cos(this.yaw);
-            const inFront =
-              distance < 0.001 ||
-              (this.toPlayer.x * forwardX + this.toPlayer.z * forwardZ) / distance > 0;
-            // A wall or trunk between the two stops the blow, exactly like it
-            // stops the camera and target selection.
-            const clear = hasLineOfSight(
-              this.position.x,
-              this.position.y + CHEST,
-              this.position.z,
-              playerPosition.x,
-              playerPosition.y + CHEST,
-              playerPosition.z,
-              this.world.obstacles,
-            );
-
-            if (distance < this.config.attackRange + 0.55 && inFront && playerAlive && clear) {
-              this.onHitPlayer?.(this.config.damage, this.position, this);
-            }
+            // Defer the gameplay hit until after this frame advances the
+            // authored strike pose in the animation mixer.
+            this.attackImpactPending = true;
           }
 
           if (this.stateTimer >= duration) {
-            // Jittered recovery so a group does not swing in lockstep, and the
-            // gap between attacks stays readable.
-            this.cooldown = this.config.attackCooldown * (0.9 + Math.random() * 0.35);
+            // The cooldown is the readable, exploitable recovery window.
+            this.cooldown = this.config.attackCooldown;
             this.state = 'chase';
             this.stateTimer = 0;
           }
@@ -205,6 +188,11 @@ export class Enemy {
     this.rig.root.position.copy(this.position);
     this.rig.root.rotation.y = this.yaw;
     this.rig.update(delta);
+
+    if (this.attackImpactPending) {
+      this.attackImpactPending = false;
+      this.resolveAttackImpact(playerPosition, playerAlive);
+    }
   }
 
   takeDamage(amount: number, from: THREE.Vector3): boolean {
@@ -228,6 +216,7 @@ export class Enemy {
     this.state = 'hurt';
     this.hurtTimer = 0.32;
     this.stateTimer = 0;
+    this.attackImpactPending = false;
     this.rig.animator.play('Hit_A', { once: true, fade: 0.06, clamp: true });
     return true;
   }
@@ -240,6 +229,7 @@ export class Enemy {
     this.cooldown = 0;
     this.hurtTimer = 0;
     this.attackLanded = false;
+    this.attackImpactPending = false;
     this.position.copy(this.home);
     this.yaw = Math.PI;
     this.rig.animator.play('Idle_A', { fade: 0.1 });
@@ -250,7 +240,35 @@ export class Enemy {
   private die(): void {
     this.alive = false;
     this.state = 'dead';
+    this.attackImpactPending = false;
     this.rig.animator.play('Death_A', { once: true, fade: 0.1, clamp: true });
+  }
+
+  private resolveAttackImpact(playerPosition: THREE.Vector3, playerAlive: boolean): void {
+    if (!playerAlive) return;
+
+    // Re-check range, committed facing, and line of sight at the exact impact
+    // frame. The facing is no longer updated after the commitment point.
+    this.toPlayer.copy(playerPosition).sub(this.position).setY(0);
+    const distance = this.toPlayer.length();
+    const forwardX = Math.sin(this.yaw);
+    const forwardZ = Math.cos(this.yaw);
+    const inFront =
+      distance < 0.001 ||
+      (this.toPlayer.x * forwardX + this.toPlayer.z * forwardZ) / distance > 0;
+    const clear = hasLineOfSight(
+      this.position.x,
+      this.position.y + CHEST,
+      this.position.z,
+      playerPosition.x,
+      playerPosition.y + CHEST,
+      playerPosition.z,
+      this.world.obstacles,
+    );
+
+    if (distance < this.config.attackRange + 0.55 && inFront && clear) {
+      this.onHitPlayer?.(this.config.damage, this.position, this);
+    }
   }
 
   private patrol(delta: number): void {
