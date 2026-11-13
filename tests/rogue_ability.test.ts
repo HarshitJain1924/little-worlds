@@ -8,6 +8,8 @@ import {
   ROGUE_SHADOWSTEP_STEP_COUNT,
   ROGUE_SHADOWSTEP_STEP_DURATION,
   ROGUE_SHADOWSTEP_DASH_DURATION,
+  ROGUE_SHADOWSTEP_STRIKE_CONTACT,
+  ROGUE_SHADOWSTEP_STRIKE_TIME_SCALE,
   ROGUE_SHADOWSTEP_DASH_DISTANCE,
   ROGUE_SHADOWSTEP_TOTAL_DURATION,
   ROGUE_ABILITY,
@@ -125,7 +127,7 @@ test('Rogue ability activation and correct initial animation', () => {
   assert.equal(player.currentAbility?.name, 'Shadowstep');
 });
 
-test('Sequential dash strikes across 3 steps with animation switching', () => {
+test('Sequential dash strikes across 3 steps with animation switching and timing', () => {
   const { rig, player, camera, input } = createTestEnvironment('rogue');
 
   const stepsRecorded: number[] = [];
@@ -140,48 +142,48 @@ test('Sequential dash strikes across 3 steps with animation switching', () => {
   assert.equal(stepsRecorded[0], 0);
   assert.equal(rig.animator.playing, 'Dodge_Forward');
 
-  // Advance to strike window of step 0 (t = 0.133s >= 0.12s)
-  for (let i = 0; i < 7; i += 1) {
+  // Step 0: advance past dashDuration (0.15s, 10 frames = 0.166s)
+  for (let i = 0; i < 9; i += 1) {
     player.update(1 / 60, input as never, camera as never);
   }
   assert.equal(rig.animator.playing, 'Melee_Dualwield_Attack_Slice');
 
-  // Advance into step 1 (t = 0.233s > 0.22s)
-  for (let i = 0; i < 6; i += 1) {
+  // Step 1: advance past stepDuration (0.40s, 15 more frames = 0.416s)
+  for (let i = 0; i < 15; i += 1) {
     player.update(1 / 60, input as never, camera as never);
   }
   assert.equal(stepsRecorded.length, 2);
   assert.equal(stepsRecorded[1], 1);
   assert.equal(rig.animator.playing, 'Dodge_Forward');
 
-  // Advance to strike window of step 1 (t = 0.35s, inStep = 0.13s >= 0.12s)
-  for (let i = 0; i < 7; i += 1) {
+  // Step 1: advance past dashDuration (0.15s into step 1, 10 frames)
+  for (let i = 0; i < 10; i += 1) {
     player.update(1 / 60, input as never, camera as never);
   }
   assert.equal(rig.animator.playing, 'Melee_Dualwield_Attack_Slice');
 
-  // Advance into step 2 (t = 0.45s > 0.44s)
-  for (let i = 0; i < 6; i += 1) {
+  // Step 2: advance into step 2 (0.80s, 15 more frames = 0.833s)
+  for (let i = 0; i < 15; i += 1) {
     player.update(1 / 60, input as never, camera as never);
   }
   assert.equal(stepsRecorded.length, 3);
   assert.equal(stepsRecorded[2], 2);
   assert.equal(rig.animator.playing, 'Dodge_Forward');
 
-  // Advance to strike window of step 2 (t = 0.57s)
-  for (let i = 0; i < 7; i += 1) {
+  // Step 2: advance past dashDuration (0.15s into step 2, 10 frames)
+  for (let i = 0; i < 10; i += 1) {
     player.update(1 / 60, input as never, camera as never);
   }
   assert.equal(rig.animator.playing, 'Melee_Dualwield_Attack_Slice');
 
-  // Advance to recovery (t >= 0.66s)
-  for (let i = 0; i < 6; i += 1) {
+  // Advance to recovery (t >= 1.20s, 15 more frames = 1.25s)
+  for (let i = 0; i < 15; i += 1) {
     player.update(1 / 60, input as never, camera as never);
   }
   assert.equal(player.activeAbilityPhase, 'recovery');
 
-  // Advance past total duration (0.82s, ~10 more frames)
-  for (let i = 0; i < 12; i += 1) {
+  // Advance past total duration (1.38s, 10 more frames = 1.41s)
+  for (let i = 0; i < 10; i += 1) {
     player.update(1 / 60, input as never, camera as never);
   }
   assert.equal(player.activeAbilityPhase, 'idle');
@@ -206,26 +208,65 @@ test('Collision stopping each dash at walls and obstacles without teleporting th
   // Rogue at (0, 0, 0) facing -Z towards the wall at z = -1.5
   player.update(1 / 60, input as never, camera as never);
 
-  // Dash duration is 0.12s (~8 frames @ 60fps)
+  // Dash duration is 0.15s (~10 frames @ 60fps)
   for (let i = 0; i < 10; i += 1) {
     player.update(1 / 60, input as never, camera as never);
   }
 
-  // Rogue should be stopped in front of the wall (z around -0.9 .. -1.2), never penetrating inside minZ..maxZ
+  // Rogue should be stopped in front of the wall (z around -0.85 .. -1.25), never penetrating inside minZ..maxZ
   assert.ok(
     player.position.z > -1.3,
     `Player position z=${player.position.z} must stop before wall front face z=-1.3`,
   );
   assert.ok(
-    player.position.z < -0.5,
+    player.position.z < -0.4,
     `Player position z=${player.position.z} must have dashed forward toward the wall`,
   );
 });
 
-test('Strike timing matches animation windows: hits land during strike phase, not frame 0', () => {
+test('Next step starts from the actual collision-resolved position', () => {
+  // Wall placed at z = -1.5
+  const wall = {
+    kind: 'box',
+    minX: -2,
+    maxX: 2,
+    minZ: -1.7,
+    maxZ: -1.3,
+    bottom: 0,
+    top: 3,
+  };
+
+  const { player, camera, input } = createTestEnvironment('rogue', [wall]);
+
+  input.abilityEdge = true;
+  player.update(1 / 60, input as never, camera as never);
+
+  // Advance through step 0 (24 frames = 0.40s)
+  for (let i = 0; i < 24; i += 1) {
+    player.update(1 / 60, input as never, camera as never);
+  }
+
+  // When step 1 initiates at 0.40s, position must stay in front of the wall
+  const stoppedZ = player.position.z;
+  assert.ok(stoppedZ > -1.3, 'Player stopped in front of wall');
+
+  // Advance into step 1 dash (5 frames)
+  for (let i = 0; i < 5; i += 1) {
+    player.update(1 / 60, input as never, camera as never);
+  }
+
+  // The player did not teleport or penetrate the wall
+  assert.ok(player.position.z > -1.3, 'Player remains safely in front of the wall during step 1');
+  assert.ok(
+    Math.abs(player.position.z - stoppedZ) < 0.1,
+    'Player stayed at the collision boundary because obstacle is directly ahead',
+  );
+});
+
+test('Damage occurs at measured animation contact timing (0.36s inStep), no damage before contact', () => {
   const { player, camera, input } = createTestEnvironment('rogue');
 
-  const enemy = { id: 'target', alive: true, position: new THREE.Vector3(0, 0, -1.8) };
+  const enemy = { id: 'target', alive: true, position: new THREE.Vector3(0, 0, -1.5) };
   player.findAreaTargets = () => [enemy];
 
   const hitEvents: number[] = [];
@@ -235,29 +276,36 @@ test('Strike timing matches animation windows: hits land during strike phase, no
 
   let currentFrame = 0;
   input.abilityEdge = true;
-  player.update(1 / 60, input as never, camera as never); // Frame 0: activation
+  player.update(1 / 60, input as never, camera as never); // Frame 0: activation (t=0.016s)
 
-  // Frames 1-6 (t = 0.016s .. 0.10s): in dash surge, strike has not landed yet
-  for (let f = 1; f <= 6; f += 1) {
+  // Frames 1-8 (t = 0.033s .. 0.150s): Dash surge phase. No damage!
+  for (let f = 1; f <= 8; f += 1) {
     currentFrame = f;
     player.update(1 / 60, input as never, camera as never);
   }
-  assert.equal(hitEvents.length, 0, 'No damage during dash surge before strike window');
+  assert.equal(hitEvents.length, 0, 'No damage during dash surge');
 
-  // Frames 7-8 (t reaches 0.133s >= 0.12s dashDuration): strike executes
-  for (let f = 7; f <= 8; f += 1) {
+  // Frames 9-20 (t = 0.167s .. 0.350s): Slice windup and swing acceleration. NO damage before contact!
+  for (let f = 9; f <= 20; f += 1) {
     currentFrame = f;
     player.update(1 / 60, input as never, camera as never);
   }
-  assert.equal(hitEvents.length, 1, 'Hit lands once strike window begins');
-  assert.ok(hitEvents[0] >= 7, 'Hit landed at or after frame 7');
+  assert.equal(hitEvents.length, 0, 'No damage during slice windup before measured contact window');
+
+  // Frame 21-22 (t = 0.367s >= 0.360s dashDuration + strikeContactTime): Strike connects!
+  for (let f = 21; f <= 22; f += 1) {
+    currentFrame = f;
+    player.update(1 / 60, input as never, camera as never);
+  }
+  assert.equal(hitEvents.length, 1, 'Hit lands precisely once the measured contact window is reached');
+  assert.ok(hitEvents[0] >= 21, `Hit landed at frame ${hitEvents[0]}`);
 });
 
 test('Multiple enemies along dash path are damaged', () => {
   const { player, camera, input } = createTestEnvironment('rogue');
 
   const enemy1 = { id: 'e1', alive: true, position: new THREE.Vector3(0.3, 0, -1.0) };
-  const enemy2 = { id: 'e2', alive: true, position: new THREE.Vector3(-0.3, 0, -2.2) };
+  const enemy2 = { id: 'e2', alive: true, position: new THREE.Vector3(-0.3, 0, -2.0) };
   player.findAreaTargets = () => [enemy1, enemy2];
 
   const hitTargets: unknown[] = [];
@@ -268,8 +316,8 @@ test('Multiple enemies along dash path are damaged', () => {
   input.abilityEdge = true;
   player.update(1 / 60, input as never, camera as never);
 
-  // Advance through step 0 strike (10 frames)
-  for (let i = 0; i < 10; i += 1) {
+  // Advance through step 0 strike contact (24 frames = 0.40s)
+  for (let i = 0; i < 24; i += 1) {
     player.update(1 / 60, input as never, camera as never);
   }
 
@@ -281,8 +329,8 @@ test('Multiple enemies along dash path are damaged', () => {
 test('Enemies outside dash path corridor are not damaged', () => {
   const { player, camera, input } = createTestEnvironment('rogue');
 
-  // Path is along Z from 0 to -2.8, pathWidth is 1.3
-  const lateralEnemy = { id: 'lateral', alive: true, position: new THREE.Vector3(3.0, 0, -1.5) };
+  // Path is along Z from 0 to -2.4, pathWidth is 1.3
+  const lateralEnemy = { id: 'lateral', alive: true, position: new THREE.Vector3(2.5, 0, -1.2) };
   const behindEnemy = { id: 'behind', alive: true, position: new THREE.Vector3(0, 0, 2.5) };
   player.findAreaTargets = () => [lateralEnemy, behindEnemy];
 
@@ -294,8 +342,8 @@ test('Enemies outside dash path corridor are not damaged', () => {
   input.abilityEdge = true;
   player.update(1 / 60, input as never, camera as never);
 
-  // Advance through all 3 steps (50 frames)
-  for (let i = 0; i < 50; i += 1) {
+  // Advance through all 3 steps (80 frames = 1.33s)
+  for (let i = 0; i < 80; i += 1) {
     player.update(1 / 60, input as never, camera as never);
   }
 
@@ -316,8 +364,8 @@ test('One hit per enemy per activation: no duplicate damage across steps', () =>
   input.abilityEdge = true;
   player.update(1 / 60, input as never, camera as never);
 
-  // Advance through all 3 steps and recovery (55 frames)
-  for (let i = 0; i < 55; i += 1) {
+  // Advance through all 3 steps and recovery (85 frames = 1.41s)
+  for (let i = 0; i < 85; i += 1) {
     player.update(1 / 60, input as never, camera as never);
   }
 
@@ -339,43 +387,86 @@ test('Dead and vertically out-of-range enemies are ignored', () => {
   input.abilityEdge = true;
   player.update(1 / 60, input as never, camera as never);
 
-  for (let i = 0; i < 15; i += 1) {
+  for (let i = 0; i < 25; i += 1) {
     player.update(1 / 60, input as never, camera as never);
   }
 
   assert.equal(hitTargets.length, 0, 'Dead and elevated enemies must not be hit');
 });
 
-test('Line of sight check prevents damaging enemies through walls', () => {
+test('Isolated Line-of-Sight test: blocked by wall vs unobstructed vs outside corridor', () => {
+  // Test scenario setup:
+  // Rogue dashes along X=0 from (0,0,0) to (0,0,-2.4).
+  // Wall is placed to the right of the path: minX: 0.48, maxX: 0.72, minZ: -1.5, maxZ: -0.9.
+  // With BODY_RADIUS = 0.42, padded wall minX is 0.48 - 0.42 = 0.06 > 0, so the dash along X=0 is completely unobstructed!
   const wall = {
     kind: 'box',
-    minX: -2,
-    maxX: 2,
-    minZ: -1.2,
-    maxZ: -0.8,
+    minX: 0.48,
+    maxX: 0.72,
+    minZ: -1.5,
+    maxZ: -0.9,
     bottom: 0,
     top: 3,
   };
 
-  const { player, camera, input } = createTestEnvironment('rogue', [wall]);
+  // 1. Enemy A is at (1.0, 0, -1.2):
+  // Inside path corridor (dist=1.0 <= pathWidth 1.3, u=0.5 in [0,1]).
+  // BUT the wall sits between the dash path (X=0) and Enemy A (X=1.0).
+  // Line of sight ray from (0, 1.2, -1.2) to (1.0, 1.2, -1.2) hits the wall at X in [0.48, 0.72]!
+  const enemyBehindWall = { id: 'behindWall', alive: true, position: new THREE.Vector3(1.0, 0, -1.2) };
 
-  // Enemy is placed behind the wall at z = -2.0
-  const enemyBehindWall = { id: 'behindWall', alive: true, position: new THREE.Vector3(0, 0, -2.0) };
-  player.findAreaTargets = () => [enemyBehindWall];
+  // 2. Unobstructed Enemy B at (-0.8, 0, -1.2):
+  // Inside path corridor on the unobstructed left side.
+  const unobstructedEnemy = { id: 'unobstructed', alive: true, position: new THREE.Vector3(-0.8, 0, -1.2) };
 
-  const hitTargets: unknown[] = [];
-  player.onAbilityHit = (target) => {
-    hitTargets.push(target);
+  // 3. Out-of-path Enemy C at (2.5, 0, -1.2):
+  // Outside path corridor (dist=2.5 > pathWidth 1.3).
+  const outsideEnemy = { id: 'outside', alive: true, position: new THREE.Vector3(2.5, 0, -1.2) };
+
+  const envWithWall = createTestEnvironment('rogue', [wall]);
+  envWithWall.player.findAreaTargets = () => [enemyBehindWall, unobstructedEnemy, outsideEnemy];
+
+  const hitResultsWithWall: unknown[] = [];
+  envWithWall.player.onAbilityHit = (target) => {
+    hitResultsWithWall.push(target);
   };
 
-  input.abilityEdge = true;
-  player.update(1 / 60, input as never, camera as never);
+  envWithWall.input.abilityEdge = true;
+  envWithWall.player.update(1 / 60, envWithWall.input as never, envWithWall.camera as never);
 
-  for (let i = 0; i < 15; i += 1) {
-    player.update(1 / 60, input as never, camera as never);
+  // Advance through step 0 (24 frames = 0.40s)
+  for (let i = 0; i < 24; i += 1) {
+    envWithWall.player.update(1 / 60, envWithWall.input as never, envWithWall.camera as never);
   }
 
-  assert.equal(hitTargets.length, 0, 'Enemy behind wall must not be hit through cover');
+  // Verify: Rogue dashed full distance (unobstructed by wall)
+  const distTraveled = envWithWall.player.position.distanceTo(new THREE.Vector3(0, 0, 0));
+  assert.ok(distTraveled >= 2.3, `Rogue dashed full distance, dist=${distTraveled}`);
+  // Verify: Enemy behind wall receives NO damage because of blocked LOS
+  assert.ok(!hitResultsWithWall.includes(enemyBehindWall), 'Enemy behind wall was protected by line-of-sight obstruction');
+  // Verify: Unobstructed enemy in corridor receives damage
+  assert.ok(hitResultsWithWall.includes(unobstructedEnemy), 'Unobstructed enemy in corridor received damage');
+  // Verify: Enemy outside corridor receives NO damage
+  assert.ok(!hitResultsWithWall.includes(outsideEnemy), 'Enemy outside corridor received no damage');
+
+  // 4. Now test removing the wall:
+  // With no wall, Enemy A (who is genuinely in the path corridor) MUST receive damage!
+  const envNoWall = createTestEnvironment('rogue', []);
+  envNoWall.player.findAreaTargets = () => [enemyBehindWall];
+
+  const hitResultsNoWall: unknown[] = [];
+  envNoWall.player.onAbilityHit = (target) => {
+    hitResultsNoWall.push(target);
+  };
+
+  envNoWall.input.abilityEdge = true;
+  envNoWall.player.update(1 / 60, envNoWall.input as never, envNoWall.camera as never);
+
+  for (let i = 0; i < 24; i += 1) {
+    envNoWall.player.update(1 / 60, envNoWall.input as never, envNoWall.camera as never);
+  }
+
+  assert.ok(hitResultsNoWall.includes(enemyBehindWall), 'Removing the wall allows Enemy A to receive damage');
 });
 
 test('Cooldown behaviour and persistence across character switches', () => {
@@ -388,15 +479,15 @@ test('Cooldown behaviour and persistence across character switches', () => {
   // Cannot switch while ability is executing
   assert.equal(player.canSwitchCharacter, false);
 
-  // Advance past total duration (0.82s, ~50 frames @ 60fps)
-  for (let i = 0; i < 55; i += 1) {
+  // Advance past total duration (1.38s, ~85 frames @ 60fps)
+  for (let i = 0; i < 85; i += 1) {
     player.update(1 / 60, input as never, camera as never);
   }
   assert.equal(player.isAbilityActive, false);
   assert.equal(player.canSwitchCharacter, true);
 
   const cooldownAfterFinish = player.currentAbilityCooldown;
-  assert.ok(cooldownAfterFinish > 5.9 && cooldownAfterFinish < 6.2);
+  assert.ok(cooldownAfterFinish > 5.4 && cooldownAfterFinish < 5.8);
 
   // Switch to Knight
   player.replaceRig(makeRig() as never, profileFor('knight'));
@@ -413,12 +504,12 @@ test('Cooldown behaviour and persistence across character switches', () => {
   player.replaceRig(makeRig() as never, profileFor('rogue'));
   assert.equal(player.profile.id, 'rogue');
 
-  // Cooldown kept ticking in background (~3.9s - 4.2s left)
+  // Cooldown kept ticking in background (~3.4s - 3.8s left)
   const cooldownAfterSwap = player.currentAbilityCooldown;
-  assert.ok(cooldownAfterSwap > 3.8 && cooldownAfterSwap < 4.2);
+  assert.ok(cooldownAfterSwap > 3.3 && cooldownAfterSwap < 3.8);
 
-  // Advance remaining cooldown time (~260 frames = 4.33s)
-  for (let i = 0; i < 260; i += 1) {
+  // Advance remaining cooldown time (~230 frames = 3.83s)
+  for (let i = 0; i < 230; i += 1) {
     player.update(1 / 60, input as never, camera as never);
   }
   assert.equal(player.currentAbilityCooldown, 0);
@@ -449,8 +540,8 @@ test('Hyper-armour during active sequence and dodge cancel during recovery', () 
   assert.equal(player.isAbilityActive, true);
   assert.equal(player.isAttacking, false);
 
-  // Advance into recovery phase (t >= 0.66s, 30 more frames from t=0.18s puts t at 0.68s)
-  for (let i = 0; i < 30; i += 1) {
+  // Advance into recovery phase (t >= 1.20s, 65 more frames puts t at 1.25s)
+  for (let i = 0; i < 65; i += 1) {
     player.update(1 / 60, input as never, camera as never);
   }
   assert.equal(player.activeAbilityPhase, 'recovery');
@@ -482,8 +573,8 @@ test('Rogue light-attack alternation remains intact and is not corrupted by abil
   player.update(1 / 60, input as never, camera as never);
   assert.equal(player.isAbilityActive, true);
 
-  // Finish Shadowstep
-  for (let i = 0; i < 55; i += 1) {
+  // Finish Shadowstep (85 frames)
+  for (let i = 0; i < 85; i += 1) {
     player.update(1 / 60, input as never, camera as never);
   }
   assert.equal(player.isAbilityActive, false);

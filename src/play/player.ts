@@ -201,6 +201,7 @@ export class Player {
   private readonly abilityHitTargets = new Set<object>();
   private abilityBuffer = 0;
   private shadowstepStepIndex = -1;
+  private shadowstepStrikeStarted = false;
   private shadowstepHitThisStep = false;
   private readonly shadowstepStartPos = new THREE.Vector3();
   private readonly shadowstepTargetPos = new THREE.Vector3();
@@ -870,6 +871,7 @@ export class Player {
     this.abilityHitApplied = false;
     this.abilityHitTargets.clear();
     this.shadowstepStepIndex = -1;
+    this.shadowstepStrikeStarted = false;
     this.shadowstepHitThisStep = false;
   }
 
@@ -927,6 +929,7 @@ export class Player {
     ability: ShadowstepAbilityProfile,
   ): void {
     this.shadowstepStepIndex = stepIndex;
+    this.shadowstepStrikeStarted = false;
     this.shadowstepHitThisStep = false;
     this.shadowstepStartPos.copy(this.position);
 
@@ -1006,8 +1009,8 @@ export class Player {
 
     this.rig.animator.play(ability.clip, {
       once: true,
-      fade: 0.03,
-      timeScale: 2.0,
+      fade: 0.04,
+      timeScale: 1.6,
       clamp: true,
     });
 
@@ -1053,14 +1056,19 @@ export class Player {
         this.clampToArena();
         resolveBlockers(this.position, this.world.blockers, BODY_RADIUS);
 
-        if (!this.shadowstepHitThisStep) {
-          this.shadowstepHitThisStep = true;
+        if (!this.shadowstepStrikeStarted) {
+          this.shadowstepStrikeStarted = true;
           this.rig.animator.play(ability.strikeClip, {
             once: true,
-            fade: 0.03,
-            timeScale: 2.2,
+            fade: 0.04,
+            timeScale: ability.strikeTimeScale ?? 2.7,
             clamp: true,
           });
+        }
+
+        const contactDelay = ability.strikeContactTime ?? 0.21;
+        if (!this.shadowstepHitThisStep && tInStep >= ability.dashDuration + contactDelay) {
+          this.shadowstepHitThisStep = true;
           this.executeShadowstepStrike(ability);
         }
       }

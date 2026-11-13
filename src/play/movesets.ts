@@ -110,6 +110,8 @@ export interface ShadowstepAbilityProfile {
   stepCount: number;
   stepDuration: number;
   dashDuration: number;
+  strikeContactTime: number;
+  strikeTimeScale: number;
   dashDistance: number;
   pathWidth: number;
   damage: number;
@@ -259,15 +261,20 @@ export const BARBARIAN_ABILITY: WhirlwindAbilityProfile = {
 
 /**
  * Authored timings for Rogue's Shadowstep.
- * A 3-step rapid dash-strike sequence: each step features an evasive dash surge (0.12s)
- * transitioning into a twin-dagger cross-slice (0.10s) with line collision and path hit detection.
- * Active sequence spans 3 x 0.22s = 0.66s, followed by 0.16s recovery (total 0.82s).
+ * A 3-step rapid dash-strike sequence: each step features an evasive dash surge (0.15s)
+ * transitioning into a twin-dagger cross-slice with damage synchronized to the measured
+ * strike contact window at t=0.21s into the slice (authored peak angular velocity at 0.567s).
+ * Dash duration: 0.15s. Slice contact: 0.21s after dash ends (t_inStep = 0.36s).
+ * Follow-through completes at 0.25s after dash ends (t_inStep = 0.40s).
+ * Active sequence spans 3 x 0.40s = 1.20s, followed by 0.18s recovery (total 1.38s).
  */
 export const ROGUE_SHADOWSTEP_STEP_COUNT = 3;
-export const ROGUE_SHADOWSTEP_STEP_DURATION = 0.22;
-export const ROGUE_SHADOWSTEP_DASH_DURATION = 0.12;
-export const ROGUE_SHADOWSTEP_DASH_DISTANCE = 2.8;
-export const ROGUE_SHADOWSTEP_TOTAL_DURATION = 0.82;
+export const ROGUE_SHADOWSTEP_DASH_DURATION = 0.15;
+export const ROGUE_SHADOWSTEP_STRIKE_TIME_SCALE = 2.7;
+export const ROGUE_SHADOWSTEP_STRIKE_CONTACT = 0.21;
+export const ROGUE_SHADOWSTEP_STEP_DURATION = 0.40;
+export const ROGUE_SHADOWSTEP_DASH_DISTANCE = 2.4;
+export const ROGUE_SHADOWSTEP_TOTAL_DURATION = 1.38;
 
 export const ROGUE_ABILITY: ShadowstepAbilityProfile = {
   kind: 'shadowstep',
@@ -283,6 +290,8 @@ export const ROGUE_ABILITY: ShadowstepAbilityProfile = {
   stepCount: ROGUE_SHADOWSTEP_STEP_COUNT,
   stepDuration: ROGUE_SHADOWSTEP_STEP_DURATION,
   dashDuration: ROGUE_SHADOWSTEP_DASH_DURATION,
+  strikeContactTime: ROGUE_SHADOWSTEP_STRIKE_CONTACT,
+  strikeTimeScale: ROGUE_SHADOWSTEP_STRIKE_TIME_SCALE,
   dashDistance: ROGUE_SHADOWSTEP_DASH_DISTANCE,
   pathWidth: 1.3,
   damage: 48,

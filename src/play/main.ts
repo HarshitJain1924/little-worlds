@@ -704,6 +704,7 @@ async function boot(): Promise<void> {
     if (target && typeof target === 'object' && 'takeDamage' in target) {
       const enemy = target as Enemy;
       if (
+        ability.kind !== 'shadowstep' &&
         !hasLineOfSight(
           player.position.x,
           player.position.y + 1.2,
