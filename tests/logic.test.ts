@@ -411,6 +411,7 @@ test('every clip a moveset references ships in the animation set', () => {
       profile.guard?.clip,
       profile.guard?.hitClip,
       profile.aim?.clip,
+      profile.ability?.clip,
     ].filter(
       (name): name is string => typeof name === 'string',
     );

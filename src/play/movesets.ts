@@ -39,7 +39,37 @@ export interface CombatProfile {
   aim?: AimProfile;
   /** Heavy attack is charged by holding the heavy input, then released. */
   charge?: ChargeProfile;
+  /** Signature Adventurer ability activated with E / touch button. */
+  ability?: AbilityProfile;
 }
+
+/**
+ * Discriminated union for signature adventurer abilities.
+ * In M7.5.1, we define CounterAbilityProfile for the Knight, and union it into AbilityProfile.
+ * Future sub-milestones will add SpinAbilityProfile, DashAbilityProfile, etc.
+ */
+export interface CounterAbilityProfile {
+  kind: 'counter';
+  id: string;
+  name: string;
+  description: string;
+  cooldown: number;
+  clip: string;
+  duration: number;
+  timeScale: number;
+  armored?: boolean;
+  /** Window during which incoming damage triggers a counter (authored clip seconds). */
+  counterStart: number;
+  counterEnd: number;
+  /** Authored clip time when the counter riposte strike lands. */
+  riposteHit: number;
+  /** Riposte attack properties */
+  damage: number;
+  range: number;
+  arc: number;
+}
+
+export type AbilityProfile = CounterAbilityProfile;
 
 export interface AimProfile {
   /** Looping stance clip. */
@@ -122,6 +152,35 @@ const KNIGHT_HEAVY: AttackProfile = {
   tag: 'heavy',
 };
 
+/**
+ * Authored timings inside `Melee_Block_Attack`, measured from the shield's
+ * keyframes: the left arm braces tight (0.00..0.35s), violently accelerates forward
+ * (peak velocity 5.62 m/s at 0.367s) reaching peak extension at 0.467s (the riposte strike),
+ * with recovery spanning the remainder of the 1.067s clip.
+ */
+export const KNIGHT_COUNTER_WINDOW_START = 0.0;
+export const KNIGHT_COUNTER_WINDOW_END = 0.35;
+export const KNIGHT_RIPOSTE_HIT = 0.47;
+export const KNIGHT_BLOCK_ATTACK_DURATION = 1.067;
+
+export const KNIGHT_ABILITY: CounterAbilityProfile = {
+  kind: 'counter',
+  id: 'shield_counter',
+  name: 'Shield Counter',
+  description: 'Brace behind the shield to negate incoming attacks and deliver a devastating riposte.',
+  cooldown: 6.0,
+  clip: 'Melee_Block_Attack',
+  duration: KNIGHT_BLOCK_ATTACK_DURATION,
+  timeScale: 1.0,
+  armored: true,
+  counterStart: KNIGHT_COUNTER_WINDOW_START,
+  counterEnd: KNIGHT_COUNTER_WINDOW_END,
+  riposteHit: KNIGHT_RIPOSTE_HIT,
+  damage: 48,
+  range: 2.6,
+  arc: Math.PI * 0.4,
+};
+
 export const PROFILES: Record<CombatProfileId, CombatProfile> = {
   knight: {
     id: 'knight',
@@ -133,6 +192,7 @@ export const PROFILES: Record<CombatProfileId, CombatProfile> = {
       moveScale: 0.4,
       damageScale: 0.25,
     },
+    ability: KNIGHT_ABILITY,
   },
 
   /**

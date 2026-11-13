@@ -19,8 +19,12 @@
       <div id="party"></div>
 
       <div id="vitals" class="panel">
-        <p class="name">Knight</p>
+        <div class="vitals-header">
+          <p class="name">Knight</p>
+          <span id="ability-status" class="is-ready">E · Shield Counter</span>
+        </div>
         <div class="bar"><span id="hp-fill"></span></div>
+        <div id="ability-bar" class="ability-bar"><span id="ability-fill"></span></div>
       </div>
 
       <div id="enemy-bars"></div>
@@ -35,10 +39,11 @@
       <button id="heavy" type="button" aria-label="Heavy attack">⚡</button>
       <button id="dodge" type="button" aria-label="Dodge">↯</button>
       <button id="block" type="button" aria-label="Block">🛡</button>
+      <button id="ability" type="button" aria-label="Ability">★</button>
       <button id="lock" type="button" aria-label="Lock on">◎</button>
 
       <p id="capture" hidden>Click to capture mouse · Esc to release</p>
-      <p id="hint">WASD move · Shift run · Space jump · J attack · K heavy · F / RMB block · C dodge · Tab lock · Q switch · 1–5 adventurer · M mute · Esc release</p>
+      <p id="hint">WASD move · Shift run · Space jump · J attack · K heavy · E ability · F / RMB block · C dodge · Tab lock · Q switch · 1–5 adventurer · M mute · Esc release</p>
 
       <div id="flash"></div>
       <div id="banner" hidden><p></p></div>

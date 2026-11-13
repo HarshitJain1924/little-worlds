@@ -36,6 +36,7 @@ export class InputController {
   private readonly held = new Set<string>();
   private attackQueued = false;
   private heavyQueued = false;
+  private abilityQueued = false;
   private dodgeQueued = false;
   private jumpQueued = false;
   private lockToggleQueued = false;
@@ -78,6 +79,7 @@ export class InputController {
       heavy?: HTMLButtonElement | null;
       block?: HTMLButtonElement | null;
       dodge?: HTMLButtonElement | null;
+      ability?: HTMLButtonElement | null;
     } = {},
   ) {
     this.canvas = canvas;
@@ -141,6 +143,11 @@ export class InputController {
     combatButtons.dodge?.addEventListener('pointerdown', (event) => {
       event.preventDefault();
       this.dodgeQueued = true;
+    });
+
+    combatButtons.ability?.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      this.abilityQueued = true;
     });
 
     const blockButton = combatButtons.block;
@@ -208,6 +215,10 @@ export class InputController {
     this.heavyQueued = true;
   }
 
+  queueAbility(): void {
+    this.abilityQueued = true;
+  }
+
   queueDodge(): void {
     this.dodgeQueued = true;
   }
@@ -246,6 +257,12 @@ export class InputController {
   takeHeavy(): boolean {
     const queued = this.heavyQueued;
     this.heavyQueued = false;
+    return queued;
+  }
+
+  takeAbility(): boolean {
+    const queued = this.abilityQueued;
+    this.abilityQueued = false;
     return queued;
   }
 
@@ -301,6 +318,7 @@ export class InputController {
     }
     if (key === 'j' && !this.held.has('j')) this.attackQueued = true;
     if (key === 'k' && !this.held.has('k')) this.heavyQueued = true;
+    if (key === 'e' && !this.held.has('e')) this.abilityQueued = true;
     if ((key === 'c' || key === 'l') && !this.held.has(key)) this.dodgeQueued = true;
 
     this.held.add(key);
@@ -312,6 +330,11 @@ export class InputController {
 
   private readonly onBlur = (): void => {
     this.held.clear();
+    this.attackQueued = false;
+    this.heavyQueued = false;
+    this.abilityQueued = false;
+    this.dodgeQueued = false;
+    this.jumpQueued = false;
     this.mouseBlock = false;
     this.touchBlock = false;
     this.touchHeavy = false;

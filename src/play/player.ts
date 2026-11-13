@@ -7,8 +7,11 @@ import type { InputController } from './input';
 import { resolveBlockers } from './collision';
 import type { World } from './world';
 import { ARENA } from './world';
-import type { ChargeProfile, CombatProfile } from './movesets';
+import type { AbilityProfile, CounterAbilityProfile, ChargeProfile, CombatProfile } from './movesets';
 import { profileFor } from './movesets';
+import type { CharacterId } from './roster';
+
+export type AbilityPhase = 'idle' | 'startup' | 'active' | 'recovery';
 
 /**
  * Attack definitions. `hitStart`..`hitEnd` are the authored clip times (measured
@@ -124,6 +127,24 @@ export class Player {
    */
   onRangedShot: ((attack: AttackProfile) => void) | null = null;
 
+  /** Fired the moment an ability begins execution. */
+  onAbilityStart: ((ability: AbilityProfile) => void) | null = null;
+  /** Fired when an incoming attack is successfully negated during the counter window. */
+  onCounterSuccess: ((attacker: unknown, from: THREE.Vector3) => void) | null = null;
+  /** Fired when an ability delivers its hit or effect. */
+  onAbilityHit: ((target: unknown | null, ability: AbilityProfile) => void) | null = null;
+  /** Fallback resolver to find a target in range if the countered attacker is dead or missing. */
+  findFallbackTarget: (() => unknown | null) | null = null;
+
+  /** Cooldowns persist per character across swaps. */
+  readonly abilityCooldowns: Record<CharacterId, number> = {
+    knight: 0,
+    barbarian: 0,
+    rogue: 0,
+    ranger: 0,
+    mage: 0,
+  };
+
   /** Exposed so the camera can recenter behind the direction of travel. */
   readonly velocity = new THREE.Vector3();
   private readonly forward = new THREE.Vector3();
@@ -143,6 +164,14 @@ export class Player {
   private aiming = false;
   /** A ranged attack only ever fires one arrow. */
   private shotFired = false;
+  private abilityProfile: AbilityProfile | null = null;
+  private abilityPhase: AbilityPhase = 'idle';
+  private abilityTime = 0;
+  private counterTriggered = false;
+  private counterAttacker: unknown | null = null;
+  private readonly counterAttackerPos = new THREE.Vector3();
+  private abilityHitApplied = false;
+  private abilityBuffer = 0;
   private dodging = false;
   private dodgeTime = 0;
   private dodgeDuration: number = DODGE.duration;
@@ -227,6 +256,34 @@ export class Player {
     return this.lockTarget !== null;
   }
 
+  get isAbilityActive(): boolean {
+    return this.abilityPhase !== 'idle';
+  }
+
+  get activeAbilityPhase(): AbilityPhase {
+    return this.abilityPhase;
+  }
+
+  get currentAbility(): AbilityProfile | null {
+    return this.abilityProfile ?? this.profile.ability ?? null;
+  }
+
+  get currentAbilityCooldown(): number {
+    return this.abilityCooldowns[this.profile.id] ?? 0;
+  }
+
+  get isCounterWindowActive(): boolean {
+    if (!this.isAbilityActive || !this.abilityProfile || this.abilityProfile.kind !== 'counter') {
+      return false;
+    }
+    const clipTime = this.abilityTime * this.abilityProfile.timeScale;
+    return clipTime >= this.abilityProfile.counterStart && clipTime <= this.abilityProfile.counterEnd;
+  }
+
+  get isCounterTriggered(): boolean {
+    return this.counterTriggered;
+  }
+
   /**
    * Hard-lock facing. Movement stays camera-relative, so holding A/D strafes
    * around the target while the character keeps facing it.
@@ -247,10 +304,17 @@ export class Player {
 
   /**
    * True when swapping the visual rig cannot corrupt animation or combat state:
-   * alive, standing, and not mid-swing, mid-dodge or mid-recoil.
+   * alive, standing, and not mid-swing, mid-dodge, mid-ability or mid-recoil.
    */
   get canSwitchCharacter(): boolean {
-    return this.alive && this.grounded && !this.isAttacking && !this.dodging && this.lockTimer <= 0.05;
+    return (
+      this.alive &&
+      this.grounded &&
+      !this.isAttacking &&
+      !this.isAbilityActive &&
+      !this.dodging &&
+      this.lockTimer <= 0.05
+    );
   }
 
   /**
@@ -279,6 +343,8 @@ export class Player {
     this.charging = false;
     this.chargeTime = 0;
     this.chargeAttack = null;
+    // Active ability visual execution is dropped, but cooldowns persist in this.abilityCooldowns.
+    this.interruptAbility();
     rig.root.position.copy(this.position);
     rig.root.rotation.y = this.yaw;
     // Pose the new model in the state the simulation is already in.
@@ -340,6 +406,12 @@ export class Player {
     this.dodgeCooldown = Math.max(0, this.dodgeCooldown - delta);
     this.invulnerable = Math.max(0, this.invulnerable - delta);
 
+    for (const key of Object.keys(this.abilityCooldowns) as CharacterId[]) {
+      if (this.abilityCooldowns[key] > 0) {
+        this.abilityCooldowns[key] = Math.max(0, this.abilityCooldowns[key] - delta);
+      }
+    }
+
     if (!this.alive) {
       this.rig.update(delta);
       return;
@@ -361,6 +433,15 @@ export class Player {
     // Buffer the dodge briefly so a press during recovery is not swallowed.
     if (input.takeDodge()) this.dodgeBuffer = 0.3;
     this.dodgeBuffer = Math.max(0, this.dodgeBuffer - delta);
+
+    // Signature ability input buffer
+    if (input.takeAbility?.()) this.abilityBuffer = 0.25;
+    this.abilityBuffer = Math.max(0, this.abilityBuffer - delta);
+    if (this.abilityBuffer > 0 && this.canStartAbility()) {
+      this.abilityBuffer = 0;
+      this.startAbility(this.profile.ability!, forward);
+    }
+
     // Attacks buffer briefly too, so a press during recovery or cooldown is not
     // dropped — it becomes the next swing instead of being swallowed.
     //
@@ -381,7 +462,7 @@ export class Player {
     this.attackBuffer = Math.max(0, this.attackBuffer - delta);
     if (this.attackBuffer === 0) this.queuedAttack = null;
 
-    if (this.grounded && wantsJump && this.lockTimer <= 0 && !this.isAttacking && !this.dodging) {
+    if (this.grounded && wantsJump && this.lockTimer <= 0 && !this.isAttacking && !this.isAbilityActive && !this.dodging) {
       this.grounded = false;
       this.verticalSpeed = JUMP_SPEED;
       this.airTime = 0;
@@ -418,12 +499,12 @@ export class Player {
 
       // Keep an active guard intact through block-hit recoil if the button stays held.
       // A profile without a guard (the Rogue, the Ranger) never enters the state.
-      const canBlock = input.isBlocking() && this.grounded && !this.isAttacking && this.profile.guard !== null;
+      const canBlock = input.isBlocking() && this.grounded && !this.isAttacking && !this.isAbilityActive && this.profile.guard !== null;
       this.blocking = canBlock && (this.blocking || this.lockTimer <= 0);
 
       // Swinging, guarding and aiming all slow the character down rather than freezing them.
-      const speedFactor = this.isAttacking
-        ? 0.2
+      const speedFactor = this.isAttacking || this.isAbilityActive
+        ? 0.15
         : this.charging
           ? (this.profile.aim?.moveScale ?? 0.35)
           : this.aiming
@@ -446,20 +527,20 @@ export class Player {
 
     // While the bow/staff is up or charging, the aim owns the facing, so travel must not drag the
     // body around and make the stance oscillate.
-    if (!this.isAttacking && !this.dodging && !this.aiming && !this.charging && this.direction.lengthSq() > 0.01) {
+    if (!this.isAttacking && !this.isAbilityActive && !this.dodging && !this.aiming && !this.charging && this.direction.lengthSq() > 0.01) {
       const targetYaw = Math.atan2(this.direction.x, this.direction.z);
       this.turnToward(targetYaw, delta, 13);
     }
 
     // Locked-on: face the enemy instead of the travel direction, which makes
     // sideways and backward input read as strafing and retreating.
-    if (this.lockTarget && !this.dodging) {
+    if (this.lockTarget && !this.dodging && !this.isAbilityActive) {
       const targetYaw = Math.atan2(
         this.lockTarget.x - this.position.x,
         this.lockTarget.z - this.position.z,
       );
       this.turnToward(targetYaw, delta, 14);
-    } else if (this.aiming || this.charging) {
+    } else if ((this.aiming || this.charging) && !this.isAbilityActive) {
       // Bow/staff up or charging: face the camera's aim, arriving at it rather than snapping.
       this.turnToward(Math.atan2(forward.x, forward.z), delta, 11);
     }
@@ -469,6 +550,7 @@ export class Player {
     resolveBlockers(this.position, this.world.blockers, BODY_RADIUS);
 
     this.updateAttack(delta);
+    this.updateAbility(delta);
     this.updateDodge(delta);
     this.updateLocomotion();
 
@@ -478,11 +560,23 @@ export class Player {
   }
 
   /** Returns the damage actually taken, so the HUD can show the real number. */
-  takeDamage(amount: number, from: THREE.Vector3): number {
+  takeDamage(amount: number, from: THREE.Vector3, attacker?: unknown): number {
     if (!this.alive) return 0;
 
     // Dodge i-frames: the roll is a real evasion, not just a cosmetic clip.
     if (this.invulnerable > 0) return 0;
+
+    // Knight Shield Counter: if in valid counter window, negate incoming damage
+    // and identify the attacking enemy for the riposte strike.
+    if (this.isCounterWindowActive) {
+      if (!this.counterTriggered) {
+        this.counterTriggered = true;
+        this.counterAttacker = attacker ?? null;
+        this.counterAttackerPos.copy(from);
+        this.onCounterSuccess?.(attacker, from);
+      }
+      return 0;
+    }
 
     // Being struck interrupts a charge rather than leaking the shot later.
     this.cancelCharge();
@@ -501,6 +595,7 @@ export class Player {
       this.dodging = false;
       this.aiming = false;
       this.shotFired = false;
+      this.interruptAbility();
       this.rig.animator.play('Death_A', { once: true, fade: 0.1, clamp: true });
       return applied;
     }
@@ -508,12 +603,13 @@ export class Player {
     if (blocked && guard) {
       this.rig.animator.play(guard.hitClip, { once: true, fade: 0.06, clamp: true });
       this.lockTimer = 0.28;
-    } else if (this.attack?.armored) {
-      // Hyper-armour: the heavy swing continues through the hit, so it is not
-      // cancelled a fraction of a second before its own strike lands.
+    } else if (this.attack?.armored || (this.isAbilityActive && this.abilityProfile?.armored)) {
+      // Hyper-armour: the heavy swing or armored ability continues through the hit,
+      // so it is not cancelled a fraction of a second before its own strike lands.
       this.lockTimer = 0.12;
     } else {
       this.attack = null;
+      this.interruptAbility();
       this.lockTimer = 0.26;
       this.rig.animator.play('Hit_A', { once: true, fade: 0.06, clamp: true });
     }
@@ -553,6 +649,10 @@ export class Player {
     this.dodgeMotion = null;
     this.invulnerable = 0;
     this.lockTarget = null;
+    this.interruptAbility();
+    for (const key of Object.keys(this.abilityCooldowns) as CharacterId[]) {
+      this.abilityCooldowns[key] = 0;
+    }
     this.velocity.set(0, 0, 0);
     this.grounded = true;
     this.verticalSpeed = 0;
@@ -565,6 +665,7 @@ export class Player {
     return (
       this.cooldown <= 0 &&
       !this.isAttacking &&
+      !this.isAbilityActive &&
       !this.dodging &&
       !this.blocking &&
       this.grounded &&
@@ -655,14 +756,131 @@ export class Player {
     return attack;
   }
 
+  canStartAbility(): boolean {
+    const ability = this.profile.ability;
+    if (!ability) return false;
+    return (
+      this.alive &&
+      this.grounded &&
+      !this.isAbilityActive &&
+      this.abilityCooldowns[this.profile.id] <= 0 &&
+      !this.isAttacking &&
+      !this.dodging &&
+      this.lockTimer <= 0.05
+    );
+  }
+
+  startAbility(ability: AbilityProfile, cameraForward: THREE.Vector3): void {
+    this.abilityProfile = ability;
+    this.abilityPhase = 'startup';
+    this.abilityTime = 0;
+    this.counterTriggered = false;
+    this.counterAttacker = null;
+    this.abilityHitApplied = false;
+    this.abilityCooldowns[this.profile.id] = ability.cooldown;
+    this.blocking = false;
+    this.cancelCharge();
+
+    if (this.lockTarget) {
+      this.yaw = Math.atan2(
+        this.lockTarget.x - this.position.x,
+        this.lockTarget.z - this.position.z,
+      );
+    } else {
+      const aim = this.direction.lengthSq() > 0.01 ? this.direction : cameraForward;
+      this.yaw = Math.atan2(aim.x, aim.z);
+    }
+
+    this.rig.animator.play(ability.clip, {
+      once: true,
+      fade: 0.08,
+      timeScale: ability.timeScale,
+      clamp: true,
+    });
+
+    this.onAbilityStart?.(ability);
+  }
+
+  interruptAbility(): void {
+    this.abilityPhase = 'idle';
+    this.abilityProfile = null;
+    this.abilityTime = 0;
+    this.counterTriggered = false;
+    this.counterAttacker = null;
+    this.abilityHitApplied = false;
+  }
+
+  private updateAbility(delta: number): void {
+    if (!this.isAbilityActive || !this.abilityProfile) return;
+
+    const ability = this.abilityProfile;
+    this.abilityTime += delta;
+    const clipTime = this.abilityTime * ability.timeScale;
+
+    if (ability.kind === 'counter') {
+      const counterEnd = ability.counterEnd;
+      const riposteHit = ability.riposteHit;
+      const riposteEnd = 0.55;
+      const totalDuration = ability.duration;
+
+      if (clipTime < counterEnd) {
+        this.abilityPhase = 'startup';
+      } else if (clipTime < riposteEnd) {
+        this.abilityPhase = 'active';
+      } else if (clipTime < totalDuration) {
+        this.abilityPhase = 'recovery';
+      } else {
+        this.interruptAbility();
+        return;
+      }
+
+      if (!this.abilityHitApplied && clipTime >= riposteHit) {
+        this.abilityHitApplied = true;
+        this.executeCounterRiposte(ability);
+      }
+    }
+  }
+
+  private executeCounterRiposte(ability: CounterAbilityProfile): void {
+    if (!this.counterTriggered) return;
+
+    let target: unknown | null = null;
+    const attacker = this.counterAttacker;
+
+    if (attacker && typeof attacker === 'object') {
+      const enemyObj = attacker as { alive?: boolean; position?: THREE.Vector3 };
+      const isAlive = enemyObj.alive !== false;
+      if (isAlive && enemyObj.position) {
+        const dist = this.position.distanceTo(enemyObj.position);
+        if (dist <= ability.range + 1.2) {
+          target = attacker;
+          const dx = enemyObj.position.x - this.position.x;
+          const dz = enemyObj.position.z - this.position.z;
+          if (dx * dx + dz * dz > 0.001) {
+            this.yaw = Math.atan2(dx, dz);
+          }
+        }
+      }
+    }
+
+    if (!target && this.findFallbackTarget) {
+      target = this.findFallbackTarget();
+    }
+
+    this.onAbilityHit?.(target, ability);
+  }
+
   private canStartDodge(): boolean {
-    // A dodge may cancel attack recovery once the blade has already landed.
-    const recovering = this.attack !== null && this.attackTime > this.attack.hitStart / this.attack.timeScale;
+    // A dodge may cancel attack recovery once the blade has already landed,
+    // or ability recovery once the riposte/active window has concluded.
+    const attackRecovering = this.attack !== null && this.attackTime > this.attack.hitStart / this.attack.timeScale;
+    const abilityRecovering = this.isAbilityActive && this.abilityPhase === 'recovery';
 
     return (
       this.dodgeCooldown <= 0 &&
       !this.dodging &&
-      (!this.isAttacking || recovering) &&
+      (!this.isAttacking || attackRecovering) &&
+      (!this.isAbilityActive || abilityRecovering) &&
       this.grounded
     );
   }
@@ -721,6 +939,7 @@ export class Player {
     this.dodging = true;
     this.dodgeTime = 0;
     this.cancelCharge();
+    this.interruptAbility();
     this.dodgeClip = clip;
     this.dodgeMotion = DODGE_MOTION.get(clip) ?? null;
     this.dodgeDuration = Math.max(
@@ -841,7 +1060,7 @@ export class Player {
   }
 
   private updateLocomotion(): void {
-    if (this.isAttacking || this.dodging) return;
+    if (this.isAttacking || this.isAbilityActive || this.dodging) return;
     // The draw clip owns the body while charging; the aim loop must not replace
     // it, or the bow would re-draw itself every frame.
     if (this.charging) return;

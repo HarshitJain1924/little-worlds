@@ -70,6 +70,20 @@ export class Sfx {
     this.noise(0.08, 0.05, 'highpass', 2400, 1800);
   }
 
+  /** Metallic clash when an incoming blow is countered during the counter window. */
+  counterClash(): void {
+    this.tone(780, 520, 0.28, 0.16, 'triangle');
+    this.tone(1560, 1100, 0.22, 0.08, 'sine');
+    this.noise(0.14, 0.06, 'highpass', 3200, 2400);
+  }
+
+  /** Heavy shield riposte strike slamming into the countered attacker. */
+  shieldRiposte(): void {
+    this.tone(180, 45, 0.32, 0.25, 'triangle');
+    this.tone(480, 240, 0.18, 0.12, 'sine');
+    this.noise(0.25, 0.14, 'lowpass', 1200, 200);
+  }
+
   dodge(): void {
     this.noise(0.16, 0.035, 'bandpass', 500, 1500);
   }

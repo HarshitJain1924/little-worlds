@@ -37,6 +37,9 @@ export class Hud {
   private readonly aimChargeEl = document.querySelector<HTMLElement>('#aim-charge');
   private aimState: AimState | null = null;
   private readonly characterNameEl = document.querySelector<HTMLElement>('#vitals .name');
+  private readonly abilityStatusEl = document.querySelector<HTMLElement>('#ability-status');
+  private readonly abilityFillEl = document.querySelector<HTMLElement>('#ability-fill');
+  private readonly abilityButtonEl = document.querySelector<HTMLButtonElement>('#ability');
   private readonly partyChips = new Map<string, HTMLButtonElement>();
   private partyNames = new Map<string, string>();
 
@@ -63,6 +66,43 @@ export class Hud {
     if (!this.hpFill) return;
     const ratio = Math.max(0, Math.min(1, value / max));
     this.hpFill.style.transform = `scaleX(${ratio})`;
+  }
+
+  setAbility(name: string | null, cooldown: number, maxCooldown: number): void {
+    if (name === null) {
+      if (this.abilityStatusEl) this.abilityStatusEl.textContent = '';
+      if (this.abilityFillEl) this.abilityFillEl.style.transform = 'scaleX(0)';
+      if (this.abilityButtonEl) {
+        this.abilityButtonEl.classList.remove('is-ready');
+        this.abilityButtonEl.classList.add('is-disabled');
+      }
+      return;
+    }
+
+    const ready = cooldown <= 0;
+    if (this.abilityStatusEl) {
+      if (ready) {
+        this.abilityStatusEl.textContent = `E · ${name}`;
+        this.abilityStatusEl.classList.add('is-ready');
+        this.abilityStatusEl.classList.remove('is-cooldown');
+      } else {
+        this.abilityStatusEl.textContent = `E · ${cooldown.toFixed(1)}s`;
+        this.abilityStatusEl.classList.remove('is-ready');
+        this.abilityStatusEl.classList.add('is-cooldown');
+      }
+    }
+
+    if (this.abilityFillEl) {
+      const ratio = ready || maxCooldown <= 0 ? 1 : Math.max(0, Math.min(1, 1 - cooldown / maxCooldown));
+      this.abilityFillEl.style.transform = `scaleX(${ratio})`;
+      this.abilityFillEl.classList.toggle('is-ready', ready);
+    }
+
+    if (this.abilityButtonEl) {
+      this.abilityButtonEl.classList.toggle('is-ready', ready);
+      this.abilityButtonEl.classList.toggle('is-cooldown', !ready);
+      this.abilityButtonEl.classList.remove('is-disabled');
+    }
   }
 
   setStats(text: string): void {

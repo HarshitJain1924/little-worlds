@@ -143,12 +143,33 @@ html, body {
 
 .party-chip:active { transform: translateY(-1px) scale(0.97); }
 
+.vitals-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 7px;
+}
+
 #vitals .name {
-  margin: 0 0 7px;
+  margin: 0;
   font: 600 10px/1 ui-sans-serif, system-ui, sans-serif;
   letter-spacing: 0.18em;
   text-transform: uppercase;
   color: #9fb6da;
+}
+
+#ability-status {
+  margin: 0;
+  font: 600 10px/1 ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #ffd270;
+  font-feature-settings: 'tnum';
+  transition: color 150ms ease;
+}
+
+#ability-status.is-cooldown {
+  color: rgba(200, 220, 245, 0.45);
 }
 
 #vitals .bar,
@@ -157,6 +178,29 @@ html, body {
   border-radius: 4px;
   background: rgba(255, 255, 255, 0.12);
   overflow: hidden;
+}
+
+.ability-bar {
+  height: 4px;
+  margin-top: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.ability-bar span {
+  display: block;
+  height: 100%;
+  width: 100%;
+  border-radius: 2px;
+  background: #e6b840;
+  transform-origin: left center;
+  transition: transform 90ms ease;
+}
+
+.ability-bar span.is-ready {
+  background: #ffd050;
+  box-shadow: 0 0 6px rgba(255, 208, 80, 0.5);
 }
 
 #vitals .bar span {
@@ -359,7 +403,8 @@ html, body {
 #lock,
 #heavy,
 #block,
-#dodge {
+#dodge,
+#ability {
   position: absolute;
   width: 54px;
   height: 54px;
@@ -380,9 +425,28 @@ html, body {
 #lock:active,
 #heavy:active,
 #block:active,
-#dodge:active { background: rgba(52, 82, 130, 0.7); }
+#dodge:active,
+#ability:active { background: rgba(52, 82, 130, 0.7); }
 
 #lock { right: calc(20px + env(safe-area-inset-right)); bottom: calc(112px + env(safe-area-inset-bottom)); }
+#ability {
+  right: calc(20px + env(safe-area-inset-right));
+  bottom: calc(174px + env(safe-area-inset-bottom));
+  border-color: rgba(255, 210, 110, 0.45);
+  color: #ffe090;
+}
+#ability.is-ready {
+  border-color: rgba(255, 220, 120, 0.8);
+  background: rgba(45, 36, 16, 0.65);
+  box-shadow: 0 0 8px rgba(255, 200, 70, 0.35);
+}
+#ability.is-cooldown {
+  opacity: 0.5;
+}
+#ability.is-disabled {
+  opacity: 0.25;
+  pointer-events: none;
+}
 #heavy { right: calc(106px + env(safe-area-inset-right)); bottom: calc(32px + env(safe-area-inset-bottom)); }
 #dodge { right: calc(106px + env(safe-area-inset-right)); bottom: calc(94px + env(safe-area-inset-bottom)); }
 #block { right: calc(106px + env(safe-area-inset-right)); bottom: calc(156px + env(safe-area-inset-bottom)); }
@@ -502,7 +566,8 @@ html, body {
   #lock,
   #heavy,
   #block,
-  #dodge { display: block; }
+  #dodge,
+  #ability { display: block; }
   #hint, #capture { display: none !important; }
   #vitals { width: 46vw; bottom: calc(120px + env(safe-area-inset-bottom)); }
   #party { bottom: calc(188px + env(safe-area-inset-bottom)); gap: 5px; }

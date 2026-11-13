@@ -410,6 +410,8 @@ async function boot(): Promise<void> {
 
     activeCharacter = id;
     hud.setActiveCharacter(id);
+    const ability = player.profile.ability;
+    hud.setAbility(ability?.name ?? null, player.currentAbilityCooldown, ability?.cooldown ?? 0);
     return true;
   }
 
@@ -482,6 +484,7 @@ async function boot(): Promise<void> {
       heavy: document.querySelector<HTMLButtonElement>('#heavy'),
       block: document.querySelector<HTMLButtonElement>('#block'),
       dodge: document.querySelector<HTMLButtonElement>('#dodge'),
+      ability: document.querySelector<HTMLButtonElement>('#ability'),
     },
   );
 
@@ -620,11 +623,11 @@ async function boot(): Promise<void> {
   };
 
   for (const enemy of enemies) {
-    enemy.onHitPlayer = (damage, from) => {
-      const applied = player.takeDamage(damage, from);
+    enemy.onHitPlayer = (damage, from, attacker) => {
+      const applied = player.takeDamage(damage, from, attacker);
       const blocked = applied > 0 && applied < damage - 0.01;
 
-      // Dodge i-frames take nothing, so they get no number, spark or sound.
+      // Dodge i-frames and counter negation take nothing, so they get no number, spark or sound.
       if (applied > 0) {
         hud.damageNumber(player.position, applied, blocked ? 'blocked' : 'taken');
         effects.spawn(player.position, blocked ? 'block' : 'hit');
@@ -632,12 +635,56 @@ async function boot(): Promise<void> {
         if (blocked) sfx.block();
         else sfx.hurt();
         if (!player.alive) sfx.enemyDeath();
+        hud.flash();
+        cameraRig.shake(blocked ? 0.1 : 0.16);
       }
-
-      hud.flash();
-      cameraRig.shake(blocked ? 0.1 : 0.16);
     };
   }
+
+  player.onCounterSuccess = () => {
+    effects.spawn(player.position, 'block');
+    sfx.counterClash();
+    hitStopTimer = Math.max(hitStopTimer, 0.08);
+    cameraRig.shake(0.18);
+  };
+
+  player.findFallbackTarget = () => {
+    const forward = player.facing(scratchFacing);
+    let bestEnemy: Enemy | null = null;
+    let bestDist = Infinity;
+    const ability = player.currentAbility;
+    const range = ability ? ability.range : 2.6;
+    const arc = ability ? ability.arc : Math.PI * 0.4;
+    const cosArc = Math.cos(arc);
+
+    for (const enemy of enemies) {
+      if (!enemy.alive) continue;
+      const to = scratchA.copy(enemy.position).sub(player.position).setY(0);
+      const dist = to.length();
+      if (dist > range) continue;
+      if (dist > 0.001) to.multiplyScalar(1 / dist);
+      if (to.dot(forward) >= cosArc && dist < bestDist) {
+        bestDist = dist;
+        bestEnemy = enemy;
+      }
+    }
+    return bestEnemy;
+  };
+
+  player.onAbilityHit = (target, ability) => {
+    if (target && typeof target === 'object' && 'takeDamage' in target) {
+      const enemy = target as Enemy;
+      if (enemy.takeDamage(ability.damage, player.position)) {
+        hud.damageNumber(enemy.position, ability.damage, 'dealt');
+        effects.spawn(enemy.position, 'heavy');
+        vfx.spawn('impactHeavy', enemy.position, player.yaw);
+        sfx.shieldRiposte();
+        hitStopTimer = Math.max(hitStopTimer, 0.09);
+        cameraRig.shake(0.22);
+        if (!enemy.alive) sfx.enemyDeath();
+      }
+    }
+  };
 
   progress(0.95, 'ready');
 
@@ -665,6 +712,8 @@ async function boot(): Promise<void> {
     lastBanner = null;
     hud.showBanner(null);
     hud.setObjective('Reach the ruin · defeat the skeletons');
+    const ability = player.profile.ability;
+    hud.setAbility(ability?.name ?? null, player.currentAbilityCooldown, ability?.cooldown ?? 0);
   }
 
   window.addEventListener('keydown', (event) => {
@@ -810,6 +859,8 @@ async function boot(): Promise<void> {
   cameraRig.update(0, player.position);
   renderer.render(scene, cameraRig.camera);
   hud.setHealth(player.health, player.maxHealth);
+  const initialAbility = player.profile.ability;
+  hud.setAbility(initialAbility?.name ?? null, player.currentAbilityCooldown, initialAbility?.cooldown ?? 0);
   hud.setObjective('Reach the ruin · defeat the skeletons');
 
   if (loadingRoot) {
@@ -843,6 +894,8 @@ async function boot(): Promise<void> {
     }
 
     hud.setHealth(player.health, player.maxHealth);
+    const loopAbility = player.profile.ability;
+    hud.setAbility(loopAbility?.name ?? null, player.currentAbilityCooldown, loopAbility?.cooldown ?? 0);
     hud.update(raw, cameraRig.camera, window.innerWidth, window.innerHeight);
 
     renderer.render(scene, cameraRig.camera);
@@ -971,6 +1024,7 @@ async function boot(): Promise<void> {
         dodge?: boolean;
         block?: boolean;
         jump?: boolean;
+        ability?: boolean;
         lock?: boolean;
         next?: boolean;
       } = {},
@@ -982,6 +1036,7 @@ async function boot(): Promise<void> {
       input.virtual.heavy = move.heavy ?? false;
       if (move.attack) input.queueAttack();
       if (move.heavy) input.queueHeavy();
+      if (move.ability) input.queueAbility();
       if (move.dodge) input.queueDodge();
       if (move.jump) input.queueJump();
       if (move.lock) input.queueLockToggle();
@@ -991,6 +1046,8 @@ async function boot(): Promise<void> {
 
       renderer.render(scene, cameraRig.camera);
       hud.setHealth(player.health, player.maxHealth);
+      const debugAbility = player.profile.ability;
+      hud.setAbility(debugAbility?.name ?? null, player.currentAbilityCooldown, debugAbility?.cooldown ?? 0);
       hud.update(0, cameraRig.camera, window.innerWidth, window.innerHeight);
 
       return {
@@ -1002,6 +1059,9 @@ async function boot(): Promise<void> {
         clip: player.rig.animator.playing,
         character: activeCharacter,
         attacking: player.isAttacking,
+        abilityActive: player.isAbilityActive,
+        abilityPhase: player.activeAbilityPhase,
+        abilityCooldown: +player.currentAbilityCooldown.toFixed(2),
         blocking: player.isBlocking,
         aiming: player.isAiming,
         dodging: player.isDodging,

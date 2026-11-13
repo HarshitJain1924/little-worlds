@@ -36,7 +36,7 @@ export class Enemy {
   state: EnemyState = 'idle';
   alive = true;
 
-  onHitPlayer: ((damage: number, from: THREE.Vector3) => void) | null = null;
+  onHitPlayer: ((damage: number, from: THREE.Vector3, attacker: Enemy) => void) | null = null;
 
   private readonly home = new THREE.Vector3();
   private readonly patrolTarget = new THREE.Vector3();
@@ -177,7 +177,7 @@ export class Enemy {
             );
 
             if (distance < this.config.attackRange + 0.55 && inFront && playerAlive && clear) {
-              this.onHitPlayer?.(this.config.damage, this.position);
+              this.onHitPlayer?.(this.config.damage, this.position, this);
             }
           }
 
