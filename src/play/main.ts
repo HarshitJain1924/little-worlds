@@ -18,7 +18,7 @@ import { TargetTracker } from './targeting';
 import { ARENA, buildWorld } from './world';
 import { Hud } from './hud';
 import { ADVENTURERS, findAdventurer, type CharacterId, type WeaponKey } from './roster';
-import { profileFor } from './movesets';
+import { profileFor, type PiercingVolleyAbilityProfile } from './movesets';
 import type { ArrowVisual, Impact, ProjectileVisual } from './projectiles';
 import { ProjectilePool } from './projectiles';
 import { solveShot, type AimSolution } from './aim';
@@ -288,8 +288,17 @@ async function boot(): Promise<void> {
   }
 
   const magicVisuals = createMagicVisuals();
+  const arrowVis = arrowVisual(arrowGltf);
+  const piercingVis: ProjectileVisual = {
+    geometry: arrowVis.geometry,
+    material: new THREE.MeshBasicMaterial({
+      color: 0x7fe3ff,
+      toneMapped: false,
+    }),
+  };
   const projectiles = new ProjectilePool(scene, world, {
-    arrow: arrowVisual(arrowGltf),
+    arrow: arrowVis,
+    piercingArrow: piercingVis,
     magicLight: magicVisuals.light,
     magicHeavy: magicVisuals.heavy,
   });
@@ -388,6 +397,25 @@ async function boot(): Promise<void> {
       sfx.bowRelease(heavy);
       cameraRig.shake(heavy ? 0.06 : 0.035);
     }
+  };
+
+  player.onAbilityRangedShot = (ability) => {
+    solvePlayerAim(ability.maxRange);
+
+    if (shotDirection.lengthSq() < 1e-6) return;
+
+    projectiles.spawn({
+      origin: shotOrigin,
+      direction: shotDirection,
+      speed: ability.speed,
+      damage: ability.damage,
+      maxRange: ability.maxRange,
+      kind: 'piercingArrow',
+      piercing: true,
+    });
+
+    sfx.piercingRelease();
+    cameraRig.shake(0.07);
   };
 
   /**
@@ -518,12 +546,13 @@ async function boot(): Promise<void> {
     }
   };
 
-  /** Projectile impact feedback (arrows and magic bolts). Damage has already been applied. */
+  /** Projectile impact feedback (arrows, piercing arrows, and magic bolts). Damage has already been applied. */
   function onProjectileImpact(impact: Impact): void {
     if (impact.kind === 'expired') return;
 
     const isMagic = impact.shotKind === 'magicLight' || impact.shotKind === 'magicHeavy';
     const isHeavy = impact.shotKind === 'magicHeavy';
+    const isPiercing = impact.shotKind === 'piercingArrow';
 
     if (impact.kind === 'target' && impact.target) {
       const enemy = impact.target as Enemy;
@@ -535,6 +564,12 @@ async function boot(): Promise<void> {
         sfx.magicHit(isHeavy);
         hitStopTimer = Math.max(hitStopTimer, isHeavy ? 0.05 : 0.03);
         cameraRig.shake(isHeavy ? 0.08 : 0.05);
+      } else if (isPiercing) {
+        effects.spawn(enemy.position, 'heavy');
+        vfx.spawn('impactHeavy', impact.position, player.yaw);
+        sfx.piercingHit();
+        hitStopTimer = Math.max(hitStopTimer, 0.04);
+        cameraRig.shake(0.06);
       } else {
         effects.spawn(enemy.position, 'hit');
         vfx.spawn('impact', impact.position, player.yaw);
@@ -553,6 +588,9 @@ async function boot(): Promise<void> {
     if (isMagic) {
       vfx.spawn(isHeavy ? 'impactHeavy' : 'impact', impact.position, player.yaw);
       sfx.magicHit(isHeavy);
+    } else if (isPiercing) {
+      vfx.spawn('impactHeavy', impact.position, player.yaw);
+      sfx.arrowHit();
     } else {
       vfx.spawn('impact', impact.position, player.yaw);
       sfx.arrowHit();
@@ -690,6 +728,8 @@ async function boot(): Promise<void> {
       sfx.whirlwind();
     } else if (ability.kind === 'shadowstep') {
       sfx.shadowstepDash();
+    } else if (ability.kind === 'volley') {
+      sfx.piercingDraw();
     }
   };
 
@@ -849,7 +889,8 @@ async function boot(): Promise<void> {
     player.setLockTarget(locked ? locked.position : null);
     cameraRig.setLockTarget(locked ? locked.position : null);
 
-    cameraRig.setAiming(player.isAiming);
+    const isVolleyAiming = player.isAbilityActive && player.currentAbility?.kind === 'volley';
+    cameraRig.setAiming(player.isAiming || isVolleyAiming);
     cameraRig.update(delta, player.position, player.velocity);
     effects.update(delta, cameraRig.camera);
     vfx.update(delta, cameraRig.camera);
@@ -862,9 +903,14 @@ async function boot(): Promise<void> {
 
     const showAim =
       (player.isAiming && player.profile.aim?.clip) ||
-      (player.isCharging && activeCharacter === 'mage');
+      (player.isCharging && activeCharacter === 'mage') ||
+      isVolleyAiming;
     if (showAim) {
-      const ranged = player.isCharging ? player.profile.heavy.ranged : player.profile.light.ranged;
+      const ranged = isVolleyAiming
+        ? { maxRange: (player.currentAbility as PiercingVolleyAbilityProfile).maxRange }
+        : player.isCharging
+          ? player.profile.heavy.ranged
+          : player.profile.light.ranged;
       const solution = solvePlayerAim(ranged?.maxRange ?? 55);
       // The visible reticle is deliberately screen-centred, like a normal
       // third-person bow/shooter camera. The solver still uses aimPoint for the

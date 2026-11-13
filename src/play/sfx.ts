@@ -108,6 +108,26 @@ export class Sfx {
     this.tone(320, 140, 0.14, 0.1, 'triangle');
   }
 
+  /** Bowstring drawn tight under tension during piercing volley prep. */
+  piercingDraw(): void {
+    this.noise(0.24, 0.04, 'bandpass', 1100, 1800);
+    this.tone(140, 280, 0.28, 0.06, 'triangle');
+  }
+
+  /** High-velocity piercing arrow release: whip crack and sharp whistle. */
+  piercingRelease(): void {
+    this.noise(0.12, 0.1, 'highpass', 2800, 1200);
+    this.tone(280, 520, 0.16, 0.12, 'sawtooth');
+    this.tone(180, 80, 0.18, 0.15, 'triangle');
+  }
+
+  /** Heavy piercing arrow impact punching through target flesh/armor. */
+  piercingHit(): void {
+    this.tone(360, 90, 0.18, 0.14, 'triangle');
+    this.tone(720, 180, 0.12, 0.08, 'sine');
+    this.noise(0.16, 0.1, 'bandpass', 1600, 400);
+  }
+
   dodge(): void {
     this.noise(0.16, 0.035, 'bandpass', 500, 1500);
   }

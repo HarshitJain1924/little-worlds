@@ -118,7 +118,31 @@ export interface ShadowstepAbilityProfile {
   maxVerticalOffset?: number;
 }
 
-export type AbilityProfile = CounterAbilityProfile | WhirlwindAbilityProfile | ShadowstepAbilityProfile;
+export interface PiercingVolleyAbilityProfile {
+  kind: 'volley';
+  id: string;
+  name: string;
+  description: string;
+  cooldown: number;
+  drawClip: string;
+  releaseClip: string;
+  duration: number;
+  timeScale: number;
+  armored?: boolean;
+  drawDuration: number;
+  releaseTime: number;
+  damage: number;
+  speed: number;
+  maxRange: number;
+  piercing: boolean;
+  moveScale?: number;
+}
+
+export type AbilityProfile =
+  | CounterAbilityProfile
+  | WhirlwindAbilityProfile
+  | ShadowstepAbilityProfile
+  | PiercingVolleyAbilityProfile;
 
 export interface AimProfile {
   /** Looping stance clip. */
@@ -298,6 +322,38 @@ export const ROGUE_ABILITY: ShadowstepAbilityProfile = {
   maxVerticalOffset: 1.5,
 };
 
+/**
+ * Authored timings for Ranger's Piercing Volley.
+ * Brief draw/aim preparation (0.32s at timeScale: 2.5 on Ranged_Bow_Draw)
+ * transitioning cleanly into Ranged_Bow_Release (at timeScale: 1.4).
+ * String loose occurs at authored t = 0.28s, which is 0.28 / 1.4 = 0.20s into release.
+ * Follow-through sweep finishes at 0.65 / 1.4 = 0.46s (total t = 0.32 + 0.46 = 0.78s),
+ * with recovery lasting until 0.85s (total duration 0.85s).
+ */
+export const RANGER_VOLLEY_DRAW_DURATION = 0.32;
+export const RANGER_VOLLEY_RELEASE_TIME = 0.20;
+export const RANGER_VOLLEY_DURATION = 0.85;
+
+export const RANGER_ABILITY: PiercingVolleyAbilityProfile = {
+  kind: 'volley',
+  id: 'piercing_volley',
+  name: 'Piercing Volley',
+  description: 'Fire a high-velocity piercing arrow that penetrates through multiple foes.',
+  cooldown: 8.0,
+  drawClip: 'Ranged_Bow_Draw',
+  releaseClip: 'Ranged_Bow_Release',
+  duration: RANGER_VOLLEY_DURATION,
+  timeScale: 1.0,
+  armored: true,
+  drawDuration: RANGER_VOLLEY_DRAW_DURATION,
+  releaseTime: RANGER_VOLLEY_RELEASE_TIME,
+  damage: 60,
+  speed: 65,
+  maxRange: 55,
+  piercing: true,
+  moveScale: 0.2,
+};
+
 export const PROFILES: Record<CombatProfileId, CombatProfile> = {
   knight: {
     id: 'knight',
@@ -459,6 +515,7 @@ export const PROFILES: Record<CombatProfileId, CombatProfile> = {
       maxSpeed: 58,
       drawClip: 'Ranged_Bow_Draw',
     },
+    ability: RANGER_ABILITY,
   },
 
   /**

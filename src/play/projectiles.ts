@@ -26,7 +26,7 @@ export interface ProjectileField {
   heightAt: (x: number, z: number) => number;
 }
 
-export type ProjectileKind = 'arrow' | 'magicLight' | 'magicHeavy';
+export type ProjectileKind = 'arrow' | 'magicLight' | 'magicHeavy' | 'piercingArrow';
 
 export interface ProjectileVisual {
   geometry: THREE.BufferGeometry;
@@ -46,6 +46,7 @@ export interface Shot {
   damage: number;
   maxRange: number;
   kind?: ProjectileKind;
+  piercing?: boolean;
 }
 
 export type ImpactKind = 'target' | 'obstacle' | 'ground' | 'expired';
@@ -81,6 +82,8 @@ interface Arrow {
   damage: number;
   maxRange: number;
   travelled: number;
+  piercing: boolean;
+  readonly hitTargets: Set<ProjectileTarget>;
 }
 
 export class ProjectilePool {
@@ -90,6 +93,8 @@ export class ProjectilePool {
   private readonly visuals = new Map<ProjectileKind, ProjectileVisual>();
   private readonly position = new THREE.Vector3();
   private readonly next = new THREE.Vector3();
+  private readonly hitPosition = new THREE.Vector3();
+  private readonly targetHits: { target: ProjectileTarget; targetT: number }[] = [];
   private readonly cylinder = {
     kind: 'cylinder' as const,
     x: 0,
@@ -155,6 +160,8 @@ export class ProjectilePool {
         damage: 0,
         maxRange: 0,
         travelled: 0,
+        piercing: false,
+        hitTargets: new Set<ProjectileTarget>(),
       });
     }
   }
@@ -181,6 +188,8 @@ export class ProjectilePool {
 
     const kind = shot.kind ?? 'arrow';
     arrow.kind = kind;
+    arrow.piercing = Boolean(shot.piercing);
+    arrow.hitTargets.clear();
     arrow.active = true;
     arrow.travelled = 0;
     arrow.speed = shot.speed;
@@ -225,6 +234,99 @@ export class ProjectilePool {
       const step = Math.min(arrow.speed * delta, remaining);
       this.position.copy(arrow.tip);
       this.next.copy(this.position).addScaledVector(arrow.direction, step);
+
+      if (arrow.piercing) {
+        // Piercing arrow: passes through bodies along segment [0, blockT], damaged in entry order.
+        // Blockers (obstacles, ground) stop and retire the arrow.
+        let blockT = 1;
+        let blockKind: ImpactKind = 'expired';
+
+        const obstacleT = nearestObstruction(
+          this.position.x,
+          this.position.y,
+          this.position.z,
+          this.next.x,
+          this.next.y,
+          this.next.z,
+          this.field.obstacles,
+          0.02,
+        );
+        if (obstacleT < blockT) {
+          blockT = obstacleT;
+          blockKind = 'obstacle';
+        }
+
+        const ground = this.field.heightAt(this.next.x, this.next.z);
+        if (this.next.y <= ground && this.position.y > this.next.y) {
+          const groundT = (this.position.y - ground) / (this.position.y - this.next.y);
+          if (groundT < blockT) {
+            blockT = groundT;
+            blockKind = 'ground';
+          }
+        }
+
+        this.targetHits.length = 0;
+        for (const target of targets) {
+          if (!target.alive) continue;
+          if (arrow.hitTargets.has(target)) continue;
+
+          this.cylinder.x = target.position.x;
+          this.cylinder.z = target.position.z;
+          this.cylinder.bottom = target.position.y + ARROW_BODY.bottom;
+          this.cylinder.top = target.position.y + ARROW_BODY.top;
+
+          const targetT = segmentCylinderEntry(
+            this.position.x,
+            this.position.y,
+            this.position.z,
+            this.next.x,
+            this.next.y,
+            this.next.z,
+            this.cylinder,
+            0,
+          );
+          if (targetT <= blockT && targetT < 1) {
+            this.targetHits.push({ target, targetT });
+          }
+        }
+
+        if (this.targetHits.length > 1) {
+          this.targetHits.sort((a, b) => a.targetT - b.targetT);
+        }
+
+        for (const hit of this.targetHits) {
+          arrow.hitTargets.add(hit.target);
+          this.hitPosition.lerpVectors(this.position, this.next, hit.targetT);
+          hit.target.takeDamage(arrow.damage, this.hitPosition);
+          onImpact({
+            kind: 'target',
+            shotKind: arrow.kind,
+            position: this.hitPosition,
+            damage: arrow.damage,
+            target: hit.target,
+          });
+        }
+
+        if (blockT < 1) {
+          arrow.tip.lerpVectors(this.position, this.next, blockT);
+          arrow.travelled += step * blockT;
+          this.place(arrow);
+          this.retire(arrow);
+          onImpact({
+            kind: blockKind,
+            shotKind: arrow.kind,
+            position: arrow.tip,
+            damage: arrow.damage,
+            target: null,
+          });
+          continue;
+        }
+
+        arrow.tip.copy(this.next);
+        arrow.travelled += step;
+        this.place(arrow);
+        continue;
+      }
 
       // Nearest blocking feature along this segment: world proxy, body or ground.
       let hitT = 1;
@@ -332,6 +434,8 @@ export class ProjectilePool {
 
   private retire(arrow: Arrow): void {
     arrow.active = false;
+    arrow.piercing = false;
+    arrow.hitTargets.clear();
     for (const mesh of arrow.meshes.values()) {
       mesh.visible = false;
     }

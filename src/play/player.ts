@@ -12,6 +12,7 @@ import type {
   CounterAbilityProfile,
   WhirlwindAbilityProfile,
   ShadowstepAbilityProfile,
+  PiercingVolleyAbilityProfile,
   ChargeProfile,
   CombatProfile,
 } from './movesets';
@@ -134,6 +135,9 @@ export class Player {
    */
   onRangedShot: ((attack: AttackProfile) => void) | null = null;
 
+  /** Fired at the measured release frame of a ranged signature ability (e.g. Piercing Volley). */
+  onAbilityRangedShot: ((ability: PiercingVolleyAbilityProfile) => void) | null = null;
+
   /** Fired the moment an ability begins execution. */
   onAbilityStart: ((ability: AbilityProfile) => void) | null = null;
   /** Fired when an incoming attack is successfully negated during the counter window. */
@@ -206,6 +210,8 @@ export class Player {
   private readonly shadowstepStartPos = new THREE.Vector3();
   private readonly shadowstepTargetPos = new THREE.Vector3();
   private readonly shadowstepDashDir = new THREE.Vector3();
+  private volleyReleaseStarted = false;
+  private volleyReleaseFired = false;
   private dodging = false;
   private dodgeTime = 0;
   private dodgeDuration: number = DODGE.duration;
@@ -592,6 +598,16 @@ export class Player {
     } else if ((this.aiming || this.charging) && !this.isAbilityActive) {
       // Bow/staff up or charging: face the camera's aim, arriving at it rather than snapping.
       this.turnToward(Math.atan2(forward.x, forward.z), delta, 11);
+    } else if (this.isAbilityActive && this.abilityProfile?.kind === 'volley') {
+      if (this.lockTarget) {
+        const targetYaw = Math.atan2(
+          this.lockTarget.x - this.position.x,
+          this.lockTarget.z - this.position.z,
+        );
+        this.turnToward(targetYaw, delta, 14);
+      } else {
+        this.turnToward(Math.atan2(forward.x, forward.z), delta, 14);
+      }
     }
 
     this.applyGroundAndGravity(delta);
@@ -842,12 +858,23 @@ export class Player {
         this.lockTarget.x - this.position.x,
         this.lockTarget.z - this.position.z,
       );
+    } else if (ability.kind === 'volley') {
+      this.yaw = Math.atan2(cameraForward.x, cameraForward.z);
     } else {
       const aim = this.direction.lengthSq() > 0.01 ? this.direction : cameraForward;
       this.yaw = Math.atan2(aim.x, aim.z);
     }
 
-    if (ability.kind === 'shadowstep') {
+    if (ability.kind === 'volley') {
+      this.volleyReleaseStarted = false;
+      this.volleyReleaseFired = false;
+      this.rig.animator.play(ability.drawClip, {
+        once: true,
+        fade: 0.08,
+        timeScale: 2.5,
+        clamp: true,
+      });
+    } else if (ability.kind === 'shadowstep') {
       this.shadowstepStepIndex = -1;
       this.initiateShadowstepStep(0, ability);
     } else {
@@ -873,6 +900,8 @@ export class Player {
     this.shadowstepStepIndex = -1;
     this.shadowstepStrikeStarted = false;
     this.shadowstepHitThisStep = false;
+    this.volleyReleaseStarted = false;
+    this.volleyReleaseFired = false;
   }
 
   private updateAbility(delta: number): void {
@@ -921,6 +950,41 @@ export class Player {
       }
     } else if (ability.kind === 'shadowstep') {
       this.updateShadowstep(ability);
+    } else if (ability.kind === 'volley') {
+      this.updateVolley(ability);
+    }
+  }
+
+  private updateVolley(ability: PiercingVolleyAbilityProfile): void {
+    const clipTime = this.abilityTime * ability.timeScale;
+    const drawDuration = ability.drawDuration;
+    const releaseTime = drawDuration + ability.releaseTime;
+    const activeEnd = drawDuration + 0.33;
+    const totalDuration = ability.duration;
+
+    if (clipTime >= drawDuration && !this.volleyReleaseStarted) {
+      this.volleyReleaseStarted = true;
+      this.rig.animator.play(ability.releaseClip, {
+        once: true,
+        fade: 0.04,
+        timeScale: 1.4,
+        clamp: true,
+      });
+    }
+
+    if (clipTime >= releaseTime && !this.volleyReleaseFired) {
+      this.volleyReleaseFired = true;
+      this.onAbilityRangedShot?.(ability);
+    }
+
+    if (clipTime < drawDuration) {
+      this.abilityPhase = 'startup';
+    } else if (clipTime < activeEnd) {
+      this.abilityPhase = 'active';
+    } else if (clipTime < totalDuration) {
+      this.abilityPhase = 'recovery';
+    } else {
+      this.interruptAbility();
     }
   }
 
