@@ -10,7 +10,7 @@ import { InputController } from './input';
 import { Sfx } from './sfx';
 import { CombatVfx } from './vfx';
 import { ASSETS, loadClipSet, loadModel } from './models';
-import { Player } from './player';
+import { Player, handleAbilityHit } from './player';
 import type { EnemyConfig } from './enemy';
 import { Enemy } from './enemy';
 import { applyQuality, readQualityPreference, storeQualityPreference, type QualityLevel } from './quality';
@@ -737,7 +737,7 @@ async function boot(): Promise<void> {
 
   player.onAbilityRelease = (ability) => {
     if (ability.kind === 'nova') {
-      effects.spawn(player.position, 'magicHeavy', false);
+      effects.spawnNova(player.position, ability.radius);
       sfx.arcaneNovaBurst();
       cameraRig.shake(0.26);
     }
@@ -751,50 +751,33 @@ async function boot(): Promise<void> {
   };
 
   player.onAbilityHit = (target, ability) => {
-    if (target && typeof target === 'object' && 'takeDamage' in target) {
-      const enemy = target as Enemy;
-      if (
-        ability.kind !== 'shadowstep' &&
-        !hasLineOfSight(
-          player.position.x,
-          player.position.y + 1.2,
-          player.position.z,
-          enemy.position.x,
-          enemy.position.y + 1.2,
-          enemy.position.z,
-          world.obstacles,
-        )
-      ) {
-        return;
-      }
-      if (enemy.takeDamage(ability.damage, player.position)) {
-        hud.damageNumber(enemy.position, ability.damage, 'dealt');
-        if (ability.kind === 'shadowstep') {
-          effects.spawn(enemy.position, 'hit');
-          vfx.spawn('slashLight', enemy.position, player.yaw);
-          sfx.shadowstepStrike();
-          hitStopTimer = Math.max(hitStopTimer, 0.05);
-          cameraRig.shake(0.14);
-        } else if (ability.kind === 'nova') {
-          effects.spawn(enemy.position, 'magicHeavy');
-          vfx.spawn('impactHeavy', enemy.position, player.yaw);
-          sfx.magicHit(true);
-          hitStopTimer = Math.max(hitStopTimer, 0.1);
-          cameraRig.shake(0.28);
+    handleAbilityHit(target, ability, player, world.obstacles, (enemy, damage) => {
+      hud.damageNumber(enemy.position, damage, 'dealt');
+      if (ability.kind === 'shadowstep') {
+        effects.spawn(enemy.position, 'hit');
+        vfx.spawn('slashLight', enemy.position, player.yaw);
+        sfx.shadowstepStrike();
+        hitStopTimer = Math.max(hitStopTimer, 0.05);
+        cameraRig.shake(0.14);
+      } else if (ability.kind === 'nova') {
+        effects.spawn(enemy.position, 'magicHeavy');
+        vfx.spawn('impactHeavy', enemy.position, player.yaw);
+        sfx.magicHit(true);
+        hitStopTimer = Math.max(hitStopTimer, 0.1);
+        cameraRig.shake(0.28);
+      } else {
+        effects.spawn(enemy.position, 'heavy');
+        vfx.spawn('impactHeavy', enemy.position, player.yaw);
+        if (ability.kind === 'whirlwind') {
+          sfx.whirlwindHit();
         } else {
-          effects.spawn(enemy.position, 'heavy');
-          vfx.spawn('impactHeavy', enemy.position, player.yaw);
-          if (ability.kind === 'whirlwind') {
-            sfx.whirlwindHit();
-          } else {
-            sfx.shieldRiposte();
-          }
-          hitStopTimer = Math.max(hitStopTimer, 0.09);
-          cameraRig.shake(ability.kind === 'whirlwind' ? 0.24 : 0.22);
+          sfx.shieldRiposte();
         }
-        if (!enemy.alive) sfx.enemyDeath();
+        hitStopTimer = Math.max(hitStopTimer, 0.09);
+        cameraRig.shake(ability.kind === 'whirlwind' ? 0.24 : 0.22);
       }
-    }
+      if (!enemy.alive) sfx.enemyDeath();
+    });
   };
 
   progress(0.95, 'ready');

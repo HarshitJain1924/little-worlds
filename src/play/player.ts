@@ -4,9 +4,11 @@ import type { DodgeMotion } from './models';
 import { DODGE_MOTION, findBone } from './models';
 import type { ThirdPersonCamera } from './camera';
 import type { InputController } from './input';
+import type { CameraObstacle } from './collision';
 import { hasLineOfSight, nearestObstruction, resolveBlockers } from './collision';
 import type { World } from './world';
 import { ARENA } from './world';
+import type { Enemy } from './enemy';
 import type {
   AbilityProfile,
   CounterAbilityProfile,
@@ -21,6 +23,43 @@ import { BOW_RELEASE_SWEEP, profileFor } from './movesets';
 import type { CharacterId } from './roster';
 
 export type AbilityPhase = 'idle' | 'startup' | 'active' | 'recovery';
+
+/**
+ * Resolves ability hit logic against an enemy candidate:
+ * - Validates target is an object with takeDamage
+ * - Enforces obstacle line-of-sight checks (preventing damage through walls)
+ * - Applies enemy.takeDamage(damage, player.position)
+ * - Returns true if damage was successfully applied.
+ */
+export function handleAbilityHit(
+  target: unknown,
+  ability: AbilityProfile,
+  player: Player,
+  obstacles: readonly CameraObstacle[] = [],
+  onDamageApplied?: (enemy: Enemy, damage: number) => void,
+): boolean {
+  if (!target || typeof target !== 'object' || !('takeDamage' in target)) return false;
+  const enemy = target as Enemy;
+  if (
+    ability.kind !== 'shadowstep' &&
+    !hasLineOfSight(
+      player.position.x,
+      player.position.y + 1.2,
+      player.position.z,
+      enemy.position.x,
+      enemy.position.y + 1.2,
+      enemy.position.z,
+      obstacles,
+    )
+  ) {
+    return false;
+  }
+  const damaged = enemy.takeDamage(ability.damage, player.position);
+  if (damaged) {
+    onDamageApplied?.(enemy, ability.damage);
+  }
+  return damaged;
+}
 
 /**
  * Attack definitions. `hitStart`..`hitEnd` are the authored clip times (measured
@@ -982,25 +1021,24 @@ export class Player {
   }
 
   private updateNova(ability: ArcaneNovaAbilityProfile): void {
-    const clipTime = this.abilityTime * ability.timeScale;
+    const time = this.abilityTime;
     const channelDuration = ability.channelDuration;
     const activeEnd = ability.activeEnd;
     const totalDuration = ability.duration;
 
-    if (clipTime < channelDuration) {
+    if (time >= ability.releaseTime && !this.novaBurstFired) {
+      this.novaBurstFired = true;
+      this.executeArcaneNovaBurst(ability);
+    }
+
+    if (time < channelDuration) {
       this.abilityPhase = 'startup';
-    } else if (clipTime < activeEnd) {
+    } else if (time < activeEnd) {
       this.abilityPhase = 'active';
-    } else if (clipTime < totalDuration) {
+    } else if (time < totalDuration) {
       this.abilityPhase = 'recovery';
     } else {
       this.interruptAbility();
-      return;
-    }
-
-    if (clipTime >= ability.releaseTime && !this.novaBurstFired) {
-      this.novaBurstFired = true;
-      this.executeArcaneNovaBurst(ability);
     }
   }
 

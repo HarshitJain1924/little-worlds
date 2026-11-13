@@ -54,13 +54,15 @@ export class Enemy {
   private hurtTimer = 0;
   private attackLanded = false;
   private speed = 0;
+  private readonly world: World;
 
   constructor(
     rig: CharacterRig,
     config: EnemyConfig,
     spawn: { x: number; z: number },
-    private readonly world: World,
+    world: World,
   ) {
+    this.world = world;
     this.rig = rig;
     this.config = config;
     this.health = config.maxHealth;

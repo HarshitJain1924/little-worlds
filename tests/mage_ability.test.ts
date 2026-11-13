@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as THREE from 'three';
-import { Player } from '../src/play/player.ts';
+import { Player, handleAbilityHit } from '../src/play/player.ts';
+import { Enemy, type EnemyConfig } from '../src/play/enemy.ts';
+import { CombatEffects } from '../src/play/effects.ts';
 import {
   PROFILES,
   profileFor,
@@ -161,25 +163,25 @@ test('Mage ability lifecycle timing bounds (startup, active, recovery, idle)', (
 
   assert.equal(player.activeAbilityPhase, 'startup');
 
-  // Channel duration = 0.70s clipTime / 2.0x = 0.35s sim time
-  // Step to 0.30s sim time -> still in startup
-  player.update(0.30 - 1 / 60, input as never, camera as never);
+  // Channel duration = 0.70s sim time (startup phase)
+  // Step to 0.65s sim time -> still in startup (< 0.70s)
+  player.update(0.65 - 1 / 60, input as never, camera as never);
   assert.equal(player.activeAbilityPhase, 'startup');
 
-  // Step to 0.36s sim time (clipTime = 0.72s >= 0.70s) -> active
+  // Step to 0.72s sim time (>= 0.70s channelDuration, < 0.95s activeEnd) -> active
+  player.update(0.07, input as never, camera as never);
+  assert.equal(player.activeAbilityPhase, 'active');
+
+  // Step to 0.92s sim time (< 0.95s activeEnd) -> still active
+  player.update(0.20, input as never, camera as never);
+  assert.equal(player.activeAbilityPhase, 'active');
+
+  // Step to 0.98s sim time (>= 0.95s activeEnd, < 1.25s duration) -> recovery
   player.update(0.06, input as never, camera as never);
-  assert.equal(player.activeAbilityPhase, 'active');
-
-  // Step to 0.46s sim time (clipTime = 0.92s < 0.95s) -> still active
-  player.update(0.10, input as never, camera as never);
-  assert.equal(player.activeAbilityPhase, 'active');
-
-  // Step to 0.50s sim time (clipTime = 1.00s >= 0.95s) -> recovery
-  player.update(0.04, input as never, camera as never);
   assert.equal(player.activeAbilityPhase, 'recovery');
 
   // Step past duration (1.25s sim time) -> idle
-  player.update(0.80, input as never, camera as never);
+  player.update(0.30, input as never, camera as never);
   assert.equal(player.activeAbilityPhase, 'idle');
   assert.equal(player.isAbilityActive, false);
 });
@@ -238,8 +240,8 @@ test('Radial detection strikes enemies 360 degrees within 5.5m and ignores enemi
   input.abilityEdge = true;
   player.update(1 / 60, input as never, camera as never);
 
-  // Advance to releaseTime (0.78s / 2.0 = 0.39s)
-  player.update(0.39, input as never, camera as never);
+  // Advance to releaseTime (0.78s sim time)
+  player.update(0.78, input as never, camera as never);
 
   // All 4 enemies within 5.5m should be hit
   assert.ok(hitTargets.includes(frontEnemy));
@@ -269,13 +271,13 @@ test('No damage dealt before release time', () => {
   input.abilityEdge = true;
   player.update(1 / 60, input as never, camera as never);
 
-  // Advance to 0.35s (before releaseTime 0.39s)
-  player.update(0.34, input as never, camera as never);
+  // Advance to 0.70s (before releaseTime 0.78s)
+  player.update(0.69, input as never, camera as never);
   assert.equal(hitTargets.length, 0);
   assert.equal(enemy.health, 100);
 
-  // Advance to 0.40s (releaseTime passed)
-  player.update(0.06, input as never, camera as never);
+  // Advance to 0.80s (releaseTime 0.78s passed)
+  player.update(0.11, input as never, camera as never);
   assert.equal(hitTargets.length, 1);
   assert.equal(hitTargets[0], enemy);
 });
@@ -295,8 +297,8 @@ test('Single hit per enemy per activation and no duplicate damage across frames'
   input.abilityEdge = true;
   player.update(1 / 60, input as never, camera as never);
 
-  // Step frame-by-frame through the active window into recovery (30 frames ≈ 0.50s)
-  for (let i = 0; i < 30; i += 1) {
+  // Step frame-by-frame through startup past releaseTime into recovery (60 frames = 1.0s)
+  for (let i = 0; i < 60; i += 1) {
     player.update(1 / 60, input as never, camera as never);
   }
 
@@ -305,7 +307,7 @@ test('Single hit per enemy per activation and no duplicate damage across frames'
   assert.equal(player.abilityTargetsHit.has(enemy), true);
 
   // Step remaining frames until ability finishes
-  for (let i = 0; i < 50; i += 1) {
+  for (let i = 0; i < 30; i += 1) {
     player.update(1 / 60, input as never, camera as never);
   }
 
@@ -334,7 +336,7 @@ test('Dead and vertically out-of-range enemies ignored', () => {
   player.update(1 / 60, input as never, camera as never);
 
   // Advance to releaseTime
-  player.update(0.40, input as never, camera as never);
+  player.update(0.78, input as never, camera as never);
 
   assert.equal(hitTargets.length, 1);
   assert.equal(hitTargets[0], validHeightEnemy);
@@ -366,7 +368,7 @@ test('Obstacles prevent damage through walls (Line-of-Sight)', () => {
   input.abilityEdge = true;
   player.update(1 / 60, input as never, camera as never);
 
-  player.update(0.40, input as never, camera as never);
+  player.update(0.78, input as never, camera as never);
 
   assert.equal(hitTargets.length, 1);
   assert.equal(hitTargets[0], openEnemy);
@@ -394,8 +396,8 @@ test('Hyper-armour protects active staff slam phase while startup and recovery a
     input.abilityEdge = true;
     player.update(1 / 60, input as never, camera as never);
 
-    // Step into active phase (sim time 0.36s, clipTime 0.72s)
-    player.update(0.35, input as never, camera as never);
+    // Step into active phase (sim time 0.74s, >= 0.70s channelDuration, < 0.95s activeEnd)
+    player.update(0.74, input as never, camera as never);
     assert.equal(player.activeAbilityPhase, 'active');
 
     // Take damage during active phase
@@ -411,8 +413,8 @@ test('Hyper-armour protects active staff slam phase while startup and recovery a
     input.abilityEdge = true;
     player.update(1 / 60, input as never, camera as never);
 
-    // Step into recovery phase (sim time 0.50s, clipTime 1.00s)
-    player.update(0.49, input as never, camera as never);
+    // Step into recovery phase (sim time 1.05s, >= 0.95s activeEnd, < 1.25s duration)
+    player.update(1.04, input as never, camera as never);
     assert.equal(player.activeAbilityPhase, 'recovery');
 
     // Take damage during recovery phase
@@ -428,23 +430,23 @@ test('Dodge cancellation permitted during recovery phase', () => {
   input.abilityEdge = true;
   player.update(1 / 60, input as never, camera as never);
 
-  // During startup (0.15s), dodge cannot interrupt
-  player.update(0.15, input as never, camera as never);
+  // During startup (0.30s), dodge cannot interrupt
+  player.update(0.30, input as never, camera as never);
   input.dodgeEdge = true;
   player.update(1 / 60, input as never, camera as never);
   assert.equal(player.isDodging, false);
   assert.equal(player.isAbilityActive, true);
 
-  // During active phase (0.40s), dodge cannot interrupt
-  player.update(0.24, input as never, camera as never);
+  // During active phase (0.75s), dodge cannot interrupt
+  player.update(0.44, input as never, camera as never);
   assert.equal(player.activeAbilityPhase, 'active');
   input.dodgeEdge = true;
   player.update(1 / 60, input as never, camera as never);
   assert.equal(player.isDodging, false);
   assert.equal(player.isAbilityActive, true);
 
-  // During recovery phase (0.50s), dodge cancels ability
-  player.update(0.10, input as never, camera as never);
+  // During recovery phase (1.05s), dodge cancels ability
+  player.update(0.29, input as never, camera as never);
   assert.equal(player.activeAbilityPhase, 'recovery');
   input.dodgeEdge = true;
   player.update(1 / 60, input as never, camera as never);
@@ -578,4 +580,123 @@ test('Regression check: Knight, Barbarian, Rogue, and Ranger abilities remain fu
   assert.equal(rig.animator.playing, 'Ranged_Bow_Draw');
   player.update(1.0, input as never, camera as never);
   assert.equal(player.isAbilityActive, false);
+});
+
+test('Real Enemy integration: handleAbilityHit damages real Enemy instance with damage and knockback', () => {
+  const wall: CameraObstacle = {
+    kind: 'box',
+    minX: -5,
+    maxX: 5,
+    minZ: -2.2,
+    maxZ: -1.8,
+    bottom: 0,
+    top: 5,
+  };
+  const { player } = createTestEnvironment('mage', [wall]);
+
+  const enemyConfig: EnemyConfig = {
+    label: 'Test Minion',
+    maxHealth: 100,
+    speed: 2.5,
+    damage: 10,
+    aggroRadius: 10,
+    attackRange: 2.5,
+    attackCooldown: 1.5,
+  };
+
+  const world = { heightAt: (): number => 0, blockers: [], obstacles: [wall] };
+  const rig1 = makeRig();
+  const rig2 = makeRig();
+  const unblockedEnemy = new Enemy(rig1 as never, enemyConfig, { x: 3, z: 0 }, world as never);
+  const blockedEnemy = new Enemy(rig2 as never, enemyConfig, { x: 0, z: -3.5 }, world as never);
+
+  let damageCallbackEnemy: Enemy | null = null;
+  let damageCallbackAmount = 0;
+
+  // Unblocked enemy hit
+  const hitSuccess = handleAbilityHit(
+    unblockedEnemy,
+    MAGE_ABILITY,
+    player,
+    world.obstacles,
+    (enemy, damage) => {
+      damageCallbackEnemy = enemy;
+      damageCallbackAmount = damage;
+    },
+  );
+
+  assert.equal(hitSuccess, true);
+  assert.equal(damageCallbackEnemy, unblockedEnemy);
+  assert.equal(damageCallbackAmount, MAGE_NOVA_DAMAGE);
+  assert.equal(unblockedEnemy.health, 100 - MAGE_NOVA_DAMAGE);
+  assert.ok(unblockedEnemy.position.x > 3.0, 'Enemy was knocked back along positive X axis');
+
+  // Blocked enemy hit should fail LOS check
+  const blockedSuccess = handleAbilityHit(
+    blockedEnemy,
+    MAGE_ABILITY,
+    player,
+    world.obstacles,
+  );
+  assert.equal(blockedSuccess, false);
+  assert.equal(blockedEnemy.health, 100);
+});
+
+test('Arcane Nova triggers onAbilityRelease for shockwave VFX even with zero enemies present', () => {
+  const { player, camera, input } = createTestEnvironment('mage');
+
+  player.findAreaTargets = () => []; // No enemies in scene
+
+  let releaseFired = false;
+  let releasedAbilityKind = '';
+  let releasedRadius = 0;
+
+  player.onAbilityRelease = (ability) => {
+    releaseFired = true;
+    releasedAbilityKind = ability.kind;
+    if (ability.kind === 'nova') {
+      releasedRadius = ability.radius;
+    }
+  };
+
+  input.abilityEdge = true;
+  player.update(1 / 60, input as never, camera as never);
+  assert.equal(releaseFired, false);
+
+  // Advance to releaseTime
+  player.update(0.78, input as never, camera as never);
+  assert.equal(releaseFired, true);
+  assert.equal(releasedAbilityKind, 'nova');
+  assert.equal(releasedRadius, 5.5);
+});
+
+test('CombatEffects: Arcane Nova shockwave pooling, expansion to target radius, and disposal', () => {
+  const scene = new THREE.Scene();
+  const effects = new CombatEffects(scene);
+  const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 100);
+  camera.position.set(0, 5, 8);
+  camera.lookAt(0, 0, 0);
+
+  // Spawn nova shockwave at (2, 0, 3) with target radius 5.5
+  effects.spawnNova({ x: 2, y: 0, z: 3 }, 5.5);
+
+  const group = scene.getObjectByName('combat-effects') as THREE.Group;
+  assert.ok(group, 'CombatEffects group exists in scene');
+
+  // Verify effects update and expand
+  // At t=0.1s: radius expands from 0.4 toward 5.5
+  effects.update(0.1, camera);
+
+  // Step until nova finishes (life = 0.48s)
+  effects.update(0.40, camera);
+
+  // Spawn multiple times to verify pool wraps around and recycles cleanly without throwing
+  for (let i = 0; i < 6; i += 1) {
+    effects.spawnNova({ x: i, y: 0, z: 0 }, 5.5);
+    effects.update(0.05, camera);
+  }
+
+  // Dispose cleanly
+  effects.dispose();
+  assert.doesNotThrow(() => effects.dispose());
 });

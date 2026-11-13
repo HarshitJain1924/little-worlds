@@ -26,6 +26,19 @@ interface Telegraph {
   material: THREE.MeshBasicMaterial;
 }
 
+interface NovaEffect {
+  ringMesh: THREE.Mesh;
+  ringMaterial: THREE.MeshBasicMaterial;
+  coreMesh: THREE.Mesh;
+  coreMaterial: THREE.MeshBasicMaterial;
+  flareMesh: THREE.Mesh;
+  flareMaterial: THREE.MeshBasicMaterial;
+  age: number;
+  life: number;
+  targetRadius: number;
+  active: boolean;
+}
+
 const COLORS: Record<ImpactKind, number> = {
   hit: 0xffd7a0,
   heavy: 0xffb066,
@@ -36,14 +49,20 @@ const COLORS: Record<ImpactKind, number> = {
 
 const BURST_COUNT = 8;
 const TELEGRAPH_COUNT = 3;
+const NOVA_COUNT = 3;
 
 export class CombatEffects {
   private readonly group = new THREE.Group();
   private readonly bursts: Burst[] = [];
   private readonly telegraphs: Telegraph[] = [];
+  private readonly novaEffects: NovaEffect[] = [];
   private readonly impactGeometry = new THREE.RingGeometry(0.16, 0.26, 20);
   private readonly groundGeometry = new THREE.RingGeometry(0.62, 0.74, 28);
+  private readonly novaRingGeometry = new THREE.RingGeometry(0.88, 1.0, 48);
+  private readonly novaCoreGeometry = new THREE.RingGeometry(0.04, 1.0, 32);
+  private readonly novaFlareGeometry = new THREE.RingGeometry(0.2, 1.0, 24);
   private cursor = 0;
+  private novaCursor = 0;
 
   constructor(scene: THREE.Scene) {
     this.group.name = 'combat-effects';
@@ -95,6 +114,68 @@ export class CombatEffects {
       this.group.add(mesh);
       this.telegraphs.push({ mesh, material });
     }
+
+    for (let i = 0; i < NOVA_COUNT; i += 1) {
+      const ringMaterial = new THREE.MeshBasicMaterial({
+        color: 0xdf70ff,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        toneMapped: false,
+      });
+      const ringMesh = new THREE.Mesh(this.novaRingGeometry, ringMaterial);
+      ringMesh.rotation.x = -Math.PI / 2;
+      ringMesh.visible = false;
+      ringMesh.frustumCulled = false;
+      ringMesh.renderOrder = 3;
+      this.group.add(ringMesh);
+
+      const coreMaterial = new THREE.MeshBasicMaterial({
+        color: 0xffccff,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        toneMapped: false,
+      });
+      const coreMesh = new THREE.Mesh(this.novaCoreGeometry, coreMaterial);
+      coreMesh.rotation.x = -Math.PI / 2;
+      coreMesh.visible = false;
+      coreMesh.frustumCulled = false;
+      coreMesh.renderOrder = 4;
+      this.group.add(coreMesh);
+
+      const flareMaterial = new THREE.MeshBasicMaterial({
+        color: 0xbf55ec,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        toneMapped: false,
+      });
+      const flareMesh = new THREE.Mesh(this.novaFlareGeometry, flareMaterial);
+      flareMesh.visible = false;
+      flareMesh.frustumCulled = false;
+      flareMesh.renderOrder = 5;
+      this.group.add(flareMesh);
+
+      this.novaEffects.push({
+        ringMesh,
+        ringMaterial,
+        coreMesh,
+        coreMaterial,
+        flareMesh,
+        flareMaterial,
+        age: 0,
+        life: 0.48,
+        targetRadius: 5.5,
+        active: false,
+      });
+    }
   }
 
   /**
@@ -139,6 +220,40 @@ export class CombatEffects {
     }
   }
 
+  /**
+   * Spawns an expanding radial Arcane Nova shockwave:
+   * - A ground-plane circular shockwave expanding outward to `radius`.
+   * - A bright central ground core pulse.
+   * - An ascending 3D energy flare ring.
+   */
+  spawnNova(position: { x: number; y: number; z: number }, radius = 5.5): void {
+    const effect = this.novaEffects[this.novaCursor % this.novaEffects.length];
+    this.novaCursor += 1;
+
+    effect.age = 0;
+    effect.life = 0.48;
+    effect.targetRadius = radius;
+    effect.active = true;
+
+    // Ground shockwave sits slightly above terrain to prevent Z-fighting
+    effect.ringMesh.position.set(position.x, position.y + 0.08, position.z);
+    effect.ringMesh.scale.set(0.4, 0.4, 1);
+    effect.ringMaterial.opacity = 0.95;
+    effect.ringMesh.visible = true;
+
+    // Bright core release pulse at center
+    effect.coreMesh.position.set(position.x, position.y + 0.06, position.z);
+    effect.coreMesh.scale.set(0.5, 0.5, 1);
+    effect.coreMaterial.opacity = 0.95;
+    effect.coreMesh.visible = true;
+
+    // Mid-torso energy flare
+    effect.flareMesh.position.set(position.x, position.y + 0.9, position.z);
+    effect.flareMesh.scale.setScalar(0.6);
+    effect.flareMaterial.opacity = 0.8;
+    effect.flareMesh.visible = true;
+  }
+
   update(delta: number, camera: THREE.Camera): void {
     for (const burst of this.bursts) {
       if (!burst.active) continue;
@@ -157,12 +272,56 @@ export class CombatEffects {
       burst.mesh.scale.setScalar(burst.startScale + (burst.endScale - burst.startScale) * t);
       burst.material.opacity = burst.baseOpacity * (1 - t) * (1 - t);
     }
+
+    for (const nova of this.novaEffects) {
+      if (!nova.active) continue;
+
+      nova.age += delta;
+      const t = nova.age / nova.life;
+
+      if (t >= 1) {
+        nova.active = false;
+        nova.ringMesh.visible = false;
+        nova.coreMesh.visible = false;
+        nova.flareMesh.visible = false;
+        nova.ringMaterial.opacity = 0;
+        nova.coreMaterial.opacity = 0;
+        nova.flareMaterial.opacity = 0;
+        continue;
+      }
+
+      // Ground shockwave: quadratic deceleration expansion to targetRadius
+      const ease = 1 - Math.pow(1 - t, 2.5);
+      const currentRadius = 0.4 + (nova.targetRadius - 0.4) * ease;
+      nova.ringMesh.scale.set(currentRadius, currentRadius, 1);
+      nova.ringMaterial.opacity = 0.95 * (1 - t * t);
+
+      // Central core pulse: expands quickly to ~1.7m and fades out by t=0.5
+      const coreT = Math.min(1, nova.age / 0.22);
+      const coreScale = 0.5 + 1.2 * (1 - Math.pow(1 - coreT, 2));
+      nova.coreMesh.scale.set(coreScale, coreScale, 1);
+      nova.coreMaterial.opacity = 0.95 * (1 - coreT);
+
+      // Vertical flare billboarding to camera
+      const flareT = Math.min(1, nova.age / 0.32);
+      nova.flareMesh.quaternion.copy(camera.quaternion);
+      nova.flareMesh.scale.setScalar(0.6 + 2.0 * flareT);
+      nova.flareMaterial.opacity = 0.8 * (1 - flareT);
+    }
   }
 
   dispose(): void {
     this.impactGeometry.dispose();
     this.groundGeometry.dispose();
+    this.novaRingGeometry.dispose();
+    this.novaCoreGeometry.dispose();
+    this.novaFlareGeometry.dispose();
     for (const burst of this.bursts) burst.material.dispose();
     for (const telegraph of this.telegraphs) telegraph.material.dispose();
+    for (const nova of this.novaEffects) {
+      nova.ringMaterial.dispose();
+      nova.coreMaterial.dispose();
+      nova.flareMaterial.dispose();
+    }
   }
 }
