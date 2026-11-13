@@ -730,6 +730,16 @@ async function boot(): Promise<void> {
       sfx.shadowstepDash();
     } else if (ability.kind === 'volley') {
       sfx.piercingDraw();
+    } else if (ability.kind === 'nova') {
+      sfx.arcaneNovaChannel();
+    }
+  };
+
+  player.onAbilityRelease = (ability) => {
+    if (ability.kind === 'nova') {
+      effects.spawn(player.position, 'magicHeavy', false);
+      sfx.arcaneNovaBurst();
+      cameraRig.shake(0.26);
     }
   };
 
@@ -765,6 +775,12 @@ async function boot(): Promise<void> {
           sfx.shadowstepStrike();
           hitStopTimer = Math.max(hitStopTimer, 0.05);
           cameraRig.shake(0.14);
+        } else if (ability.kind === 'nova') {
+          effects.spawn(enemy.position, 'magicHeavy');
+          vfx.spawn('impactHeavy', enemy.position, player.yaw);
+          sfx.magicHit(true);
+          hitStopTimer = Math.max(hitStopTimer, 0.1);
+          cameraRig.shake(0.28);
         } else {
           effects.spawn(enemy.position, 'heavy');
           vfx.spawn('impactHeavy', enemy.position, player.yaw);

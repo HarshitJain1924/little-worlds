@@ -13,6 +13,7 @@ import type {
   WhirlwindAbilityProfile,
   ShadowstepAbilityProfile,
   PiercingVolleyAbilityProfile,
+  ArcaneNovaAbilityProfile,
   ChargeProfile,
   CombatProfile,
 } from './movesets';
@@ -137,6 +138,8 @@ export class Player {
 
   /** Fired at the measured release frame of a ranged signature ability (e.g. Piercing Volley). */
   onAbilityRangedShot: ((ability: PiercingVolleyAbilityProfile) => void) | null = null;
+  /** Fired at the moment an ability releases its blast or projectile (e.g. Arcane Nova burst). */
+  onAbilityRelease: ((ability: AbilityProfile) => void) | null = null;
 
   /** Fired the moment an ability begins execution. */
   onAbilityStart: ((ability: AbilityProfile) => void) | null = null;
@@ -212,6 +215,7 @@ export class Player {
   private readonly shadowstepDashDir = new THREE.Vector3();
   private volleyReleaseStarted = false;
   private volleyReleaseFired = false;
+  private novaBurstFired = false;
   private dodging = false;
   private dodgeTime = 0;
   private dodgeDuration: number = DODGE.duration;
@@ -608,6 +612,17 @@ export class Player {
       } else {
         this.turnToward(Math.atan2(forward.x, forward.z), delta, 14);
       }
+    } else if (this.isAbilityActive && this.abilityProfile?.kind === 'nova') {
+      if (this.lockTarget) {
+        const targetYaw = Math.atan2(
+          this.lockTarget.x - this.position.x,
+          this.lockTarget.z - this.position.z,
+        );
+        this.turnToward(targetYaw, delta, 14);
+      } else {
+        const targetDir = this.direction.lengthSq() > 0.01 ? this.direction : forward;
+        this.turnToward(Math.atan2(targetDir.x, targetDir.z), delta, 14);
+      }
     }
 
     this.applyGroundAndGravity(delta);
@@ -877,6 +892,14 @@ export class Player {
     } else if (ability.kind === 'shadowstep') {
       this.shadowstepStepIndex = -1;
       this.initiateShadowstepStep(0, ability);
+    } else if (ability.kind === 'nova') {
+      this.novaBurstFired = false;
+      this.rig.animator.play(ability.clip, {
+        once: true,
+        fade: 0.08,
+        timeScale: ability.timeScale,
+        clamp: true,
+      });
     } else {
       this.rig.animator.play(ability.clip, {
         once: true,
@@ -902,6 +925,7 @@ export class Player {
     this.shadowstepHitThisStep = false;
     this.volleyReleaseStarted = false;
     this.volleyReleaseFired = false;
+    this.novaBurstFired = false;
   }
 
   private updateAbility(delta: number): void {
@@ -952,6 +976,75 @@ export class Player {
       this.updateShadowstep(ability);
     } else if (ability.kind === 'volley') {
       this.updateVolley(ability);
+    } else if (ability.kind === 'nova') {
+      this.updateNova(ability);
+    }
+  }
+
+  private updateNova(ability: ArcaneNovaAbilityProfile): void {
+    const clipTime = this.abilityTime * ability.timeScale;
+    const channelDuration = ability.channelDuration;
+    const activeEnd = ability.activeEnd;
+    const totalDuration = ability.duration;
+
+    if (clipTime < channelDuration) {
+      this.abilityPhase = 'startup';
+    } else if (clipTime < activeEnd) {
+      this.abilityPhase = 'active';
+    } else if (clipTime < totalDuration) {
+      this.abilityPhase = 'recovery';
+    } else {
+      this.interruptAbility();
+      return;
+    }
+
+    if (clipTime >= ability.releaseTime && !this.novaBurstFired) {
+      this.novaBurstFired = true;
+      this.executeArcaneNovaBurst(ability);
+    }
+  }
+
+  private executeArcaneNovaBurst(ability: ArcaneNovaAbilityProfile): void {
+    this.onAbilityRelease?.(ability);
+
+    if (!this.findAreaTargets) return;
+    const candidates = this.findAreaTargets();
+    if (!Array.isArray(candidates)) return;
+
+    const maxVertical = ability.maxVerticalOffset ?? 1.8;
+    const radiusSq = ability.radius * ability.radius;
+
+    for (const candidate of candidates) {
+      if (!candidate || typeof candidate !== 'object') continue;
+      if (this.abilityHitTargets.has(candidate)) continue;
+
+      const enemyObj = candidate as { alive?: boolean; position?: THREE.Vector3 };
+      if (enemyObj.alive === false || !enemyObj.position) continue;
+
+      const dy = Math.abs(enemyObj.position.y - this.position.y);
+      if (dy > maxVertical) continue;
+
+      const dx = enemyObj.position.x - this.position.x;
+      const dz = enemyObj.position.z - this.position.z;
+      const distSq = dx * dx + dz * dz;
+      if (distSq > radiusSq) continue;
+
+      // Obstacle line-of-sight check: do not hit through walls or solid obstacles
+      const clear =
+        !this.world.obstacles ||
+        hasLineOfSight(
+          this.position.x,
+          this.position.y + 1.2,
+          this.position.z,
+          enemyObj.position.x,
+          enemyObj.position.y + 1.2,
+          enemyObj.position.z,
+          this.world.obstacles,
+        );
+      if (!clear) continue;
+
+      this.abilityHitTargets.add(candidate);
+      this.onAbilityHit?.(candidate, ability);
     }
   }
 

@@ -142,11 +142,31 @@ export interface PiercingVolleyAbilityProfile {
   moveScale?: number;
 }
 
+export interface ArcaneNovaAbilityProfile {
+  kind: 'nova';
+  id: string;
+  name: string;
+  description: string;
+  cooldown: number;
+  clip: string;
+  duration: number;
+  timeScale: number;
+  armored?: boolean;
+  channelDuration: number;
+  releaseTime: number;
+  activeEnd: number;
+  radius: number;
+  damage: number;
+  maxVerticalOffset?: number;
+  moveScale?: number;
+}
+
 export type AbilityProfile =
   | CounterAbilityProfile
   | WhirlwindAbilityProfile
   | ShadowstepAbilityProfile
-  | PiercingVolleyAbilityProfile;
+  | PiercingVolleyAbilityProfile
+  | ArcaneNovaAbilityProfile;
 
 export interface AimProfile {
   /** Looping stance clip. */
@@ -366,6 +386,43 @@ export const RANGER_ABILITY: PiercingVolleyAbilityProfile = {
   moveScale: 0.2,
 };
 
+/**
+ * Authored timings inside `Ranged_Magic_Spellcasting_Long`, measured from the staff and
+ * skeletal keyframes: the Mage raises the staff aloft and channels concentrated mana
+ * (0.00..1.40s authored; 0.00..0.70s at 2.0x), strikes the staff into the ground to detonate
+ * the Arcane Nova (peak extension at 1.567s authored; 0.78s at 2.0x), with hyper-armoured
+ * follow-through ending at 1.90s authored (0.95s at 2.0x), and recovers to standing by 2.50s (1.25s).
+ */
+export const MAGE_NOVA_TIME_SCALE = 2.0;
+export const MAGE_NOVA_CHANNEL_DURATION = 0.70;
+export const MAGE_NOVA_RELEASE_TIME = 0.78;
+export const MAGE_NOVA_ACTIVE_END = 0.95;
+export const MAGE_NOVA_TOTAL_DURATION = 1.25;
+export const MAGE_NOVA_RADIUS = 5.5;
+export const MAGE_NOVA_DAMAGE = 58;
+export const MAGE_NOVA_COOLDOWN = 9.0;
+export const MAGE_NOVA_MAX_VERTICAL = 1.8;
+export const MAGE_NOVA_MOVE_SCALE = 0.2;
+
+export const MAGE_ABILITY: ArcaneNovaAbilityProfile = {
+  kind: 'nova',
+  id: 'arcane_nova',
+  name: 'Arcane Nova',
+  description: 'Channel concentrated mana through the staff and unleash a devastating radial burst of arcane energy.',
+  cooldown: MAGE_NOVA_COOLDOWN,
+  clip: 'Ranged_Magic_Spellcasting_Long',
+  duration: MAGE_NOVA_TOTAL_DURATION,
+  timeScale: MAGE_NOVA_TIME_SCALE,
+  armored: true,
+  channelDuration: MAGE_NOVA_CHANNEL_DURATION,
+  releaseTime: MAGE_NOVA_RELEASE_TIME,
+  activeEnd: MAGE_NOVA_ACTIVE_END,
+  radius: MAGE_NOVA_RADIUS,
+  damage: MAGE_NOVA_DAMAGE,
+  maxVerticalOffset: MAGE_NOVA_MAX_VERTICAL,
+  moveScale: MAGE_NOVA_MOVE_SCALE,
+};
+
 export const PROFILES: Record<CombatProfileId, CombatProfile> = {
   knight: {
     id: 'knight',
@@ -576,6 +633,7 @@ export const PROFILES: Record<CombatProfileId, CombatProfile> = {
       drawClip: 'Ranged_Magic_Raise',
       clampTime: 0.95,
     },
+    ability: MAGE_ABILITY,
   },
 };
 

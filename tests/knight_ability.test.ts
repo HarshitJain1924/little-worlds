@@ -111,7 +111,8 @@ test('Knight ability activation eligibility and animation triggering', () => {
 });
 
 test('Adventurers without ability cannot activate', () => {
-  const { player, camera, input } = createTestEnvironment('mage');
+  const { player, camera, input, rig } = createTestEnvironment('knight');
+  player.replaceRig(rig as never, { ...profileFor('knight'), ability: undefined });
 
   assert.equal(player.profile.ability, undefined);
   assert.equal(player.canStartAbility(), false);

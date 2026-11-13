@@ -128,6 +128,20 @@ export class Sfx {
     this.noise(0.16, 0.1, 'bandpass', 1600, 400);
   }
 
+  /** Resonant rising hum while the Mage channels arcane power for the nova. */
+  arcaneNovaChannel(): void {
+    this.tone(180, 480, 0.65, 0.12, 'sine');
+    this.tone(360, 960, 0.65, 0.06, 'triangle');
+    this.noise(0.65, 0.04, 'bandpass', 800, 2200);
+  }
+
+  /** Devastating radial shockwave detonation when the Arcane Nova releases. */
+  arcaneNovaBurst(): void {
+    this.tone(520, 110, 0.38, 0.28, 'sine');
+    this.tone(1040, 220, 0.3, 0.16, 'triangle');
+    this.noise(0.35, 0.18, 'lowpass', 1600, 260);
+  }
+
   dodge(): void {
     this.noise(0.16, 0.035, 'bandpass', 500, 1500);
   }
