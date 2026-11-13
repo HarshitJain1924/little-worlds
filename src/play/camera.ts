@@ -72,6 +72,8 @@ export class ThirdPersonCamera {
 
   private readonly focus = new THREE.Vector3();
   private readonly focusTarget = new THREE.Vector3();
+  private readonly viewTarget = new THREE.Vector3();
+  private readonly shoulderOffset = new THREE.Vector3();
   private readonly desired = new THREE.Vector3();
 
   private readonly obstacles: readonly CameraObstacle[];
@@ -312,6 +314,7 @@ export class ThirdPersonCamera {
     const shoulder = (this.lockTarget ? AIM_LOCK_SHOULDER : AIM_SHOULDER) * aim;
     const rightX = Math.cos(this.yaw) * shoulder;
     const rightZ = -Math.sin(this.yaw) * shoulder;
+    this.shoulderOffset.set(rightX, 0, rightZ);
     this.desired.x += rightX;
     this.desired.z += rightZ;
 
@@ -357,6 +360,10 @@ export class ThirdPersonCamera {
       this.shakeAmount *= Math.exp(-delta * 7);
     }
 
-    this.camera.lookAt(this.focus);
+    // Shift the entire aim rig sideways: both camera and look target move
+    // together, keeping view direction (and centre-screen projectile aim)
+    // unchanged while the player moves left within the frame.
+    this.viewTarget.copy(this.focus).add(this.shoulderOffset);
+    this.camera.lookAt(this.viewTarget);
   }
 }

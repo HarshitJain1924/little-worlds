@@ -97,6 +97,11 @@ export class InputController {
     canvas.addEventListener('pointermove', this.onPointerMove);
     canvas.addEventListener('pointerup', this.onPointerUp);
     canvas.addEventListener('pointercancel', this.onPointerUp);
+    // Pointer lock retargets pointer events to the locked element, but browser
+    // capture/fallback paths may deliver the matching release at document.
+    // Listen there too; the pointerId/button guards make bubbling duplicates safe.
+    document.addEventListener('pointerup', this.onPointerUp);
+    document.addEventListener('pointercancel', this.onPointerUp);
     canvas.addEventListener('wheel', this.onWheel, { passive: false });
     canvas.addEventListener('contextmenu', (event) => event.preventDefault());
 
@@ -327,8 +332,8 @@ export class InputController {
       this.lookId = null;
       this.tapCandidate = null;
     } else {
-      // Releasing capture must not leave a stuck guard or movement key.
-      this.mouseBlock = false;
+      // Pointer lock can be lost while the physical RMB is still held. Keep
+      // the aim state until the matching pointerup; blur still clears it.
       this.lookId = null;
     }
     this.onPointerLockChange?.(this.pointerLocked);
