@@ -12,7 +12,13 @@ import { CombatVfx } from './vfx';
 import { ASSETS, loadClipSet, loadModel } from './models';
 import { Player, handleAbilityHit, handleProjectileImpact } from './player';
 import type { EnemyConfig } from './enemy';
-import { Enemy, separateEnemyBodies, updateEnemyEncounter } from './enemy';
+import {
+  Enemy,
+  constrainEnemyBodies,
+  separateEnemyBodies,
+  syncEnemyTransforms,
+  updateEnemyEncounter,
+} from './enemy';
 import { applyQuality, readQualityPreference, storeQualityPreference, type QualityLevel } from './quality';
 import { TargetTracker } from './targeting';
 import { ARENA, buildWorld } from './world';
@@ -869,6 +875,7 @@ async function boot(): Promise<void> {
     updateEnemyEncounter(enemies, delta, player.position, player.alive);
 
     separateEnemyBodies(enemies);
+    constrainEnemyBodies(enemies, world.blockers, world.heightAt);
 
     // Keep bodies apart without a physics engine.
     for (const enemy of enemies) {
@@ -880,6 +887,12 @@ async function boot(): Promise<void> {
         enemy.position.add(away);
       }
     }
+
+    // The player push can disturb the pack, so resolve the formation once
+    // more before publishing the final positions to the render roots.
+    separateEnemyBodies(enemies);
+    constrainEnemyBodies(enemies, world.blockers, world.heightAt);
+    syncEnemyTransforms(enemies);
 
     // Ground telegraph under every enemy that has committed to a swing. Its
     // ring fills as the wind-up completes, so the blow is telegraphed in-world.

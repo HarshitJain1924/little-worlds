@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as THREE from 'three';
-import { Enemy, separateEnemyBodies, type EnemyConfig, updateEnemyEncounter } from '../src/play/enemy.ts';
+import {
+  constrainEnemyBodies,
+  Enemy,
+  separateEnemyBodies,
+  syncEnemyTransforms,
+  type EnemyConfig,
+  updateEnemyEncounter,
+} from '../src/play/enemy.ts';
 
 function makeRig(): {
   root: THREE.Object3D;
@@ -179,6 +186,8 @@ test('Enemy encounter limits pressure and separates approaching bodies', () => {
   const enemies = [makeEnemy(0).enemy, makeEnemy(0.2).enemy, makeEnemy(0.4).enemy];
   const player = new THREE.Vector3(0, 0, -1.5);
   let attackObserved = false;
+  const attackStarts = [0, 0, 0];
+  const previousAttack = [false, false, false];
 
   for (let frame = 0; frame < 240; frame += 1) {
     updateEnemyEncounter(enemies, 1 / 60, player, true);
@@ -187,6 +196,11 @@ test('Enemy encounter limits pressure and separates approaching bodies', () => {
     const active = enemies.filter((enemy) => enemy.alive && enemy.state === 'attack').length;
     assert.ok(active <= 1, `encounter pressure exceeded one attacker: ${active}`);
     if (active > 0) attackObserved = true;
+    for (let i = 0; i < enemies.length; i += 1) {
+      const attacking = enemies[i].state === 'attack';
+      if (attacking && !previousAttack[i]) attackStarts[i] += 1;
+      previousAttack[i] = attacking;
+    }
 
     for (let i = 0; i < enemies.length; i += 1) {
       for (let j = i + 1; j < enemies.length; j += 1) {
@@ -197,6 +211,7 @@ test('Enemy encounter limits pressure and separates approaching bodies', () => {
   }
 
   assert.equal(attackObserved, true, 'the pressure gate must not deadlock the encounter');
+  assert.ok(attackStarts.every((count) => count > 0), `attack opportunities: ${attackStarts}`);
 });
 
 test('Enemy attack opportunities release after death and interruption', () => {
@@ -220,4 +235,48 @@ test('Enemy attack opportunities release after death and interruption', () => {
   interrupted.takeDamage(5, new THREE.Vector3(0, 0, 1));
   updateEnemyEncounter([interrupted, waiting], 1 / 60, player, true);
   assert.equal(waiting.state, 'attack', 'an interrupted attacker must release the pressure slot');
+});
+
+test('Enemy corrections keep roots, blockers, arena bounds, and player avoidance coherent', () => {
+  const wall = { minX: -1, maxX: 1, minZ: -1, maxZ: 1 };
+  const enemies = [makeEnemy().enemy, makeEnemy().enemy, makeEnemy().enemy];
+  const heightAt = (x: number, z: number): number => x - z;
+
+  enemies[0].position.set(0, 99, 40);
+  enemies[1].position.set(0, 99, 0);
+  enemies[2].position.set(0.2, 99, 0);
+  separateEnemyBodies(enemies);
+  constrainEnemyBodies(enemies, [wall], heightAt);
+  syncEnemyTransforms(enemies);
+
+  for (const enemy of enemies) {
+    assert.equal(enemy.rig.root.position.x, enemy.position.x);
+    assert.equal(enemy.rig.root.position.y, enemy.position.y);
+    assert.equal(enemy.rig.root.position.z, enemy.position.z);
+    assert.ok(Math.hypot(enemy.position.x, enemy.position.z) <= 32 + 1e-6);
+    assert.ok(
+      enemy.position.x <= wall.minX - 0.45 + 1e-6 ||
+      enemy.position.x >= wall.maxX + 0.45 - 1e-6 ||
+      enemy.position.z <= wall.minZ - 0.45 + 1e-6 ||
+      enemy.position.z >= wall.maxZ + 0.45 - 1e-6,
+      'enemy must remain outside the expanded blocker',
+    );
+  }
+
+  const player = new THREE.Vector3(0, 0, 0);
+  for (const enemy of enemies) {
+    const away = enemy.position.clone().sub(player).setY(0);
+    const gap = away.length();
+    if (gap > 0.001 && gap < 1.1) enemy.position.add(away.normalize().multiplyScalar((1.1 - gap) * 0.6));
+  }
+  separateEnemyBodies(enemies);
+  constrainEnemyBodies(enemies, [wall], heightAt);
+  separateEnemyBodies(enemies);
+  constrainEnemyBodies(enemies, [wall], heightAt);
+
+  for (let i = 0; i < enemies.length; i += 1) {
+    for (let j = i + 1; j < enemies.length; j += 1) {
+      assert.ok(enemies[i].position.distanceTo(enemies[j].position) >= 0.95 - 1e-6);
+    }
+  }
 });

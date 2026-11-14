@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { CharacterRig } from './character';
 import { hasLineOfSight, resolveBlockers } from './collision';
+import type { PlanarBox } from './collision';
 import type { World } from './world';
 import { ARENA } from './world';
 
@@ -435,5 +436,36 @@ export function separateEnemyBodies(enemies: readonly Enemy[], minimumDistance =
         second.position.z += dz * push;
       }
     }
+  }
+}
+
+/** Re-applies the same ground, blocker, and arena constraints after pack correction. */
+export function constrainEnemyBodies(
+  enemies: readonly Enemy[],
+  blockers: readonly PlanarBox[],
+  heightAt: (x: number, z: number) => number,
+): void {
+  const limit = ARENA.radius - 2;
+  for (const enemy of enemies) {
+    if (!enemy.alive) continue;
+
+    // Boundary clamping can move a point back toward a blocker, so make the
+    // existing two constraints converge in a small fixed number of passes.
+    for (let pass = 0; pass < 2; pass += 1) {
+      resolveBlockers(enemy.position, blockers, BODY_RADIUS);
+      const radial = Math.hypot(enemy.position.x, enemy.position.z);
+      if (radial > limit) {
+        enemy.position.x *= limit / radial;
+        enemy.position.z *= limit / radial;
+      }
+    }
+    enemy.position.y = heightAt(enemy.position.x, enemy.position.z);
+  }
+}
+
+/** Copies final logical enemy positions to their render roots after corrections. */
+export function syncEnemyTransforms(enemies: readonly Enemy[]): void {
+  for (const enemy of enemies) {
+    if (enemy.alive) enemy.rig.root.position.copy(enemy.position);
   }
 }
