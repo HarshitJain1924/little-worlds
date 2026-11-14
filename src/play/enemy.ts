@@ -54,6 +54,7 @@ export class Enemy {
   private hurtTimer = 0;
   private attackLanded = false;
   private attackImpactPending = false;
+  private attackPermission = true;
   private speed = 0;
   private readonly world: World;
 
@@ -83,6 +84,10 @@ export class Enemy {
 
   get recoveryRemaining(): number {
     return this.cooldown;
+  }
+
+  setAttackPermission(allowed: boolean): void {
+    this.attackPermission = allowed;
   }
 
   /** True between committing to a swing and the blow actually landing. */
@@ -129,7 +134,7 @@ export class Enemy {
             this.state = 'idle';
             break;
           }
-          if (distance < this.config.attackRange && this.cooldown <= 0) {
+          if (this.attackPermission && distance < this.config.attackRange && this.cooldown <= 0) {
             this.state = 'attack';
             // The animator is advanced at the end of this same update, so the
             // gameplay clock includes this frame too.
@@ -146,7 +151,7 @@ export class Enemy {
             // Approach on a shallow arc rather than a dead-straight line, so two
             // skeletons do not stack on the same track into the player's back.
             this.chaseTarget.copy(playerPosition);
-            if (distance > this.config.attackRange + 1.4 && distance > 0.001) {
+            if ((!this.attackPermission || distance > this.config.attackRange + 1.4) && distance > 0.001) {
               const nx = this.toPlayer.x / distance;
               const nz = this.toPlayer.z / distance;
               this.chaseTarget.x += -nz * this.flankSign * 1.2;
@@ -236,6 +241,7 @@ export class Enemy {
     this.hurtTimer = 0;
     this.attackLanded = false;
     this.attackImpactPending = false;
+    this.attackPermission = true;
     this.position.copy(this.home);
     this.yaw = Math.PI;
     this.rig.animator.play('Idle_A', { fade: 0.1 });
@@ -366,5 +372,68 @@ export class Enemy {
     }
 
     this.rig.animator.play('Idle_A', { fade: 0.25 });
+  }
+}
+
+/** Updates an encounter with a bounded, deterministic number of active attackers. */
+export function updateEnemyEncounter(
+  enemies: readonly Enemy[],
+  delta: number,
+  playerPosition: THREE.Vector3,
+  playerAlive: boolean,
+  maxAttackers = 1,
+): void {
+  let activeAttackers = 0;
+  const limit = Math.max(1, Math.floor(maxAttackers));
+  for (const enemy of enemies) {
+    if (enemy.alive && enemy.state === 'attack') activeAttackers += 1;
+  }
+
+  for (const enemy of enemies) {
+    const wasAttacking = enemy.alive && enemy.state === 'attack';
+    enemy.setAttackPermission(wasAttacking || activeAttackers < limit);
+    enemy.update(delta, playerPosition, playerAlive);
+    const isAttacking = enemy.alive && enemy.state === 'attack';
+
+    if (!wasAttacking && isAttacking) activeAttackers += 1;
+    else if (wasAttacking && !isAttacking) activeAttackers -= 1;
+  }
+}
+
+/** Keeps the small enemy pack from occupying one attack position. */
+export function separateEnemyBodies(enemies: readonly Enemy[], minimumDistance = 0.95): void {
+  const minimumDistanceSq = minimumDistance * minimumDistance;
+  // A short deterministic relaxation handles a three-enemy pack without
+  // introducing a physics system or allowing a later pair to re-overlap an
+  // earlier pair in the same pass.
+  const maxPasses = Math.max(1, enemies.length * enemies.length * 4);
+  for (let pass = 0; pass < maxPasses; pass += 1) {
+    for (let i = 0; i < enemies.length; i += 1) {
+      const first = enemies[i];
+      if (!first.alive) continue;
+
+      for (let j = i + 1; j < enemies.length; j += 1) {
+        const second = enemies[j];
+        if (!second.alive) continue;
+
+        let dx = second.position.x - first.position.x;
+        let dz = second.position.z - first.position.z;
+        const distanceSq = dx * dx + dz * dz;
+        if (distanceSq >= minimumDistanceSq) continue;
+
+        let distance = Math.sqrt(distanceSq);
+        if (distance < 1e-6) {
+          dx = i % 2 === 0 ? 1 : -1;
+          dz = 0;
+          distance = 1;
+        }
+
+        const push = (minimumDistance - distance) / distance * 0.5;
+        first.position.x -= dx * push;
+        first.position.z -= dz * push;
+        second.position.x += dx * push;
+        second.position.z += dz * push;
+      }
+    }
   }
 }

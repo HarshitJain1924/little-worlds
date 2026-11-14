@@ -12,7 +12,7 @@ import { CombatVfx } from './vfx';
 import { ASSETS, loadClipSet, loadModel } from './models';
 import { Player, handleAbilityHit, handleProjectileImpact } from './player';
 import type { EnemyConfig } from './enemy';
-import { Enemy } from './enemy';
+import { Enemy, separateEnemyBodies, updateEnemyEncounter } from './enemy';
 import { applyQuality, readQualityPreference, storeQualityPreference, type QualityLevel } from './quality';
 import { TargetTracker } from './targeting';
 import { ARENA, buildWorld } from './world';
@@ -866,7 +866,9 @@ async function boot(): Promise<void> {
 
     projectiles.update(delta, enemies, onProjectileImpact);
 
-    for (const enemy of enemies) enemy.update(delta, player.position, player.alive);
+    updateEnemyEncounter(enemies, delta, player.position, player.alive);
+
+    separateEnemyBodies(enemies);
 
     // Keep bodies apart without a physics engine.
     for (const enemy of enemies) {

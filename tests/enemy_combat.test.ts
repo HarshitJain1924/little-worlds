@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as THREE from 'three';
-import { Enemy, type EnemyConfig } from '../src/play/enemy.ts';
+import { Enemy, separateEnemyBodies, type EnemyConfig, updateEnemyEncounter } from '../src/play/enemy.ts';
 
 function makeRig(): {
   root: THREE.Object3D;
@@ -173,4 +173,51 @@ test('Enemy impacts respect walls, range, player death, interruption, and reset'
   assert.equal(reset.enemy.isWindingUp, false);
   reset.enemy.update(0.6, resetPlayer, true);
   assert.equal(resetHits, 0, 'reset must clear pending attack impact state');
+});
+
+test('Enemy encounter limits pressure and separates approaching bodies', () => {
+  const enemies = [makeEnemy(0).enemy, makeEnemy(0.2).enemy, makeEnemy(0.4).enemy];
+  const player = new THREE.Vector3(0, 0, -1.5);
+  let attackObserved = false;
+
+  for (let frame = 0; frame < 240; frame += 1) {
+    updateEnemyEncounter(enemies, 1 / 60, player, true);
+    separateEnemyBodies(enemies);
+
+    const active = enemies.filter((enemy) => enemy.alive && enemy.state === 'attack').length;
+    assert.ok(active <= 1, `encounter pressure exceeded one attacker: ${active}`);
+    if (active > 0) attackObserved = true;
+
+    for (let i = 0; i < enemies.length; i += 1) {
+      for (let j = i + 1; j < enemies.length; j += 1) {
+        const distance = enemies[i].position.distanceTo(enemies[j].position);
+        assert.ok(distance >= 0.95 - 1e-6, `enemy bodies stacked at ${distance}`);
+      }
+    }
+  }
+
+  assert.equal(attackObserved, true, 'the pressure gate must not deadlock the encounter');
+});
+
+test('Enemy attack opportunities release after death and interruption', () => {
+  const first = makeEnemy(0).enemy;
+  const second = makeEnemy(0.2).enemy;
+  const player = new THREE.Vector3(0, 0, -1.5);
+  updateEnemyEncounter([first, second], 1 / 60, player, true);
+  updateEnemyEncounter([first, second], 1 / 60, player, true);
+  assert.equal(first.state, 'attack');
+  assert.equal(second.state, 'chase');
+
+  first.takeDamage(200, new THREE.Vector3(0, 0, 1));
+  updateEnemyEncounter([first, second], 1 / 60, player, true);
+  assert.equal(second.state, 'attack', 'a dead attacker must release the pressure slot');
+
+  const interrupted = makeEnemy(0).enemy;
+  const waiting = makeEnemy(0.2).enemy;
+  updateEnemyEncounter([interrupted, waiting], 1 / 60, player, true);
+  updateEnemyEncounter([interrupted, waiting], 1 / 60, player, true);
+  assert.equal(interrupted.state, 'attack');
+  interrupted.takeDamage(5, new THREE.Vector3(0, 0, 1));
+  updateEnemyEncounter([interrupted, waiting], 1 / 60, player, true);
+  assert.equal(waiting.state, 'attack', 'an interrupted attacker must release the pressure slot');
 });
