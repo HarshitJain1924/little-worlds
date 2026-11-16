@@ -55,6 +55,7 @@ export const DUNGEON = {
 
 const forestUrl = (name: string): string => `./rpg/forest/${name}.gltf`;
 const dungeonUrl = (name: string): string => `./rpg/dungeon/${name}.gltf`;
+const townUrl = (name: string): string => `./rpg/town/${name}.glb`;
 
 THREE.Cache.enabled = true;
 const loader = new GLTFLoader();
@@ -65,6 +66,7 @@ export function loadModel(url: string): Promise<GLTF> {
 
 export const loadForest = (name: string): Promise<GLTF> => loadModel(forestUrl(name));
 export const loadDungeon = (name: string): Promise<GLTF> => loadModel(dungeonUrl(name));
+export const loadTown = (name: string): Promise<GLTF> => loadModel(townUrl(name));
 
 /**
  * GLTFLoader runs node names through PropertyBinding.sanitizeNodeName, which
@@ -99,6 +101,13 @@ export interface Placement {
   z: number;
   yaw: number;
   scale: number;
+  /** Extra stretch along the model's local Z, used for roof spans. */
+  stretchZ?: number;
+}
+
+export interface InstanceOptions {
+  /** Paving and other ground decals should not pay for a shadow pass. */
+  castShadow?: boolean;
 }
 
 const UP = new THREE.Vector3(0, 1, 0);
@@ -111,7 +120,11 @@ const scale = new THREE.Vector3();
  * One InstancedMesh per source mesh, so a repeated prop costs a single draw call
  * regardless of how many copies are placed.
  */
-export function buildInstances(gltf: GLTF, placements: Placement[]): THREE.Group {
+export function buildInstances(
+  gltf: GLTF,
+  placements: Placement[],
+  options: InstanceOptions = {},
+): THREE.Group {
   const group = new THREE.Group();
   const root = gltf.scene;
   root.updateMatrixWorld(true);
@@ -131,13 +144,13 @@ export function buildInstances(gltf: GLTF, placements: Placement[]): THREE.Group
 
   for (const part of parts) {
     const instanced = new THREE.InstancedMesh(part.geometry, part.material, placements.length);
-    instanced.castShadow = true;
+    instanced.castShadow = options.castShadow ?? true;
     instanced.receiveShadow = true;
 
     placements.forEach((placement, index) => {
       position.set(placement.x, placement.y, placement.z);
       quaternion.setFromAxisAngle(UP, placement.yaw);
-      scale.setScalar(placement.scale);
+      scale.set(placement.scale, placement.scale, placement.scale * (placement.stretchZ ?? 1));
       matrix.compose(position, quaternion, scale).multiply(part.matrix);
       instanced.setMatrixAt(index, matrix);
     });

@@ -9,6 +9,7 @@ import {
   type EnemyConfig,
   updateEnemyEncounter,
 } from '../src/play/enemy.ts';
+import { ARENA } from '../src/play/world.ts';
 
 function makeRig(): {
   root: THREE.Object3D;
@@ -253,7 +254,7 @@ test('Enemy corrections keep roots, blockers, arena bounds, and player avoidance
     assert.equal(enemy.rig.root.position.x, enemy.position.x);
     assert.equal(enemy.rig.root.position.y, enemy.position.y);
     assert.equal(enemy.rig.root.position.z, enemy.position.z);
-    assert.ok(Math.hypot(enemy.position.x, enemy.position.z) <= 32 + 1e-6);
+    assert.ok(Math.hypot(enemy.position.x, enemy.position.z) <= ARENA.radius - 2 + 1e-6);
     assert.ok(
       enemy.position.x <= wall.minX - 0.45 + 1e-6 ||
       enemy.position.x >= wall.maxX + 0.45 - 1e-6 ||

@@ -501,11 +501,12 @@ async function boot(): Promise<void> {
     heightAt: world.heightAt,
   });
 
-  // Three enemies between the spawn and the ruin, so the walk has a fight in it.
+  // Three enemies live outside the streets: two in the woods flanking town and
+  // one warrior posted on the old paved way to the sealed gate.
   const enemySpecs: { config: EnemyConfig; spawn: { x: number; z: number }; kind: 'minion' | 'warrior' }[] = [
-    { config: MINION, spawn: { x: 8, z: 1 }, kind: 'minion' },
-    { config: MINION, spawn: { x: -8, z: 3 }, kind: 'minion' },
-    { config: WARRIOR, spawn: { x: 2, z: -11 }, kind: 'warrior' },
+    { config: MINION, spawn: { x: 18, z: 6 }, kind: 'minion' },
+    { config: MINION, spawn: { x: -15, z: 8 }, kind: 'minion' },
+    { config: WARRIOR, spawn: { x: 0, z: -23.5 }, kind: 'warrior' },
   ];
 
   const enemies: Enemy[] = enemySpecs.map((spec) => {
@@ -820,7 +821,7 @@ async function boot(): Promise<void> {
     defeated = false;
     lastBanner = null;
     hud.showBanner(null);
-    hud.setObjective('Reach the ruin · defeat the skeletons');
+    hud.setObjective('Explore the town · defeat the skeletons');
     const ability = player.profile.ability;
     hud.setAbility(ability?.name ?? null, player.currentAbilityCooldown, ability?.cooldown ?? 0);
   }
@@ -970,7 +971,7 @@ async function boot(): Promise<void> {
 
     if (!defeated && enemies.every((enemy) => !enemy.alive)) {
       defeated = true;
-      hud.setObjective('The ruin is clear — press R to start again');
+      hud.setObjective('The town is clear — press R to start again');
     }
   }
 
@@ -994,7 +995,7 @@ async function boot(): Promise<void> {
   hud.setHealth(player.health, player.maxHealth);
   const initialAbility = player.profile.ability;
   hud.setAbility(initialAbility?.name ?? null, player.currentAbilityCooldown, initialAbility?.cooldown ?? 0);
-  hud.setObjective('Reach the ruin · defeat the skeletons');
+  hud.setObjective('Explore the town · defeat the skeletons');
 
   if (loadingRoot) {
     loadingRoot.classList.add('is-hidden');
