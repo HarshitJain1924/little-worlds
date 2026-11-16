@@ -96,8 +96,10 @@ export function applyQuality(level: QualityLevel, targets: QualityTargets): Qual
     sun.shadow.map = null;
   }
 
+  // The forest is baked into a single merged tree mesh, so toggling this one
+  // shadow caster is the whole foliage shadow budget.
   foliage.traverse((child) => {
-    if ((child as THREE.InstancedMesh).isInstancedMesh) child.castShadow = preset.foliageShadows;
+    if ((child as THREE.Mesh).isMesh) child.castShadow = preset.foliageShadows;
   });
 
   if (scene.fog instanceof THREE.Fog) {

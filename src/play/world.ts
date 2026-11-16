@@ -1,19 +1,21 @@
 import * as THREE from 'three';
 import type { GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import type { CameraObstacle } from './collision';
-import type { Placement } from './models';
-import { DUNGEON, FOREST, buildInstances, loadDungeon, loadForest, loadTown, placeModel } from './models';
+import type { MergeEntry, Placement } from './models';
+import { DUNGEON, FOREST, buildMerged, loadDungeon, loadForest, loadTown } from './models';
 import {
   BUILDINGS,
   GATE,
   TOWN,
   TOWN_MODULES,
+  buildingFootprint,
   buildingPlacements,
+  dirtFactor,
   heightAt,
   isInsideBuilding,
+  nearestPath,
   pathDistance,
   pavingFactor,
-  dirtFactor,
   propPlacements,
   roadPlacements,
   townBlockers,
@@ -47,38 +49,84 @@ export interface World {
   dispose: () => void;
 }
 
-const GRASS_BASE = new THREE.Color(0x8cc45c);
-const GRASS_LIGHT = new THREE.Color(0xb6de83);
-const GRASS_DARK = new THREE.Color(0x668f42);
-const DIRT = new THREE.Color(0xb69a6a);
-const COBBLE = new THREE.Color(0xa8a89c);
-const COURT = new THREE.Color(0x9a9a8e);
+// A darker, warmer palette than the first pass: olive meadow instead of neon
+// lawn, trodden brown streets, warm flagstones and cool gate court stone.
+const GRASS_BASE = new THREE.Color(0x74964a);
+const GRASS_LIGHT = new THREE.Color(0x9db766);
+const GRASS_DRY = new THREE.Color(0x8d9450);
+const GRASS_DARK = new THREE.Color(0x4d6933);
+const DIRT = new THREE.Color(0x9a8058);
+const DIRT_DARK = new THREE.Color(0x746040);
+const COBBLE = new THREE.Color(0xa7a08e);
+const COURT = new THREE.Color(0x92948a);
+
+const smoothstep = (edge0: number, edge1: number, value: number): number => {
+  const t = Math.min(1, Math.max(0, (value - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+};
+
+const BUILDING_FOOTPRINTS = BUILDINGS.map((building) => buildingFootprint(building));
+
+/**
+ * Worn earth at the foot of every wall. Buildings that sit on bare grass read as
+ * dropped-in models; a soft apron of trodden ground ties them to the street.
+ */
+function buildingApron(x: number, z: number): number {
+  let distance = Number.POSITIVE_INFINITY;
+  for (const footprint of BUILDING_FOOTPRINTS) {
+    const dx = Math.max(footprint.minX - x, 0, x - footprint.maxX);
+    const dz = Math.max(footprint.minZ - z, 0, z - footprint.maxZ);
+    distance = Math.min(distance, Math.hypot(dx, dz));
+  }
+  return 1 - smoothstep(0.15, 2.4, distance);
+}
 
 function groundColour(x: number, z: number, out: THREE.Color): THREE.Color {
-  const variation = 0.5 + 0.5 * Math.sin(x * 0.42 + z * 0.31);
-  const patches = 0.5 + 0.5 * Math.sin(x * 0.13 - z * 0.17 + Math.sin(x * 0.05) * 2.1);
+  const broad = 0.5 + 0.5 * Math.sin(x * 0.13 - z * 0.17 + Math.sin(x * 0.05) * 2.1);
+  const fine = 0.5 + 0.5 * Math.sin(x * 0.42 + z * 0.31);
+  const dry = 0.5 + 0.5 * Math.sin(x * 0.06 + z * 0.09 + 1.7);
 
-  out.copy(GRASS_BASE).lerp(GRASS_LIGHT, variation * 0.35 + patches * 0.2);
-  out.lerp(GRASS_DARK, (1 - patches) * 0.35);
+  out.copy(GRASS_BASE);
+  out.lerp(GRASS_LIGHT, broad * 0.26 + fine * 0.16);
+  out.lerp(GRASS_DARK, (1 - broad) * 0.4);
+  out.lerp(GRASS_DRY, dry * 0.3);
+
+  // Worn earth under the eaves and trodden edges along every lane.
+  out.lerp(DIRT_DARK, buildingApron(x, z) * 0.4);
+  const near = nearestPath(x, z);
+  const half = near.path.width * 0.5;
+  if (near.distance > half) {
+    const edge = 1 - smoothstep(half + 0.15, half + 1.2, near.distance);
+    out.lerp(DIRT_DARK, edge * (near.path.kind === 'dirt' ? 0.38 : 0.2));
+  }
 
   // The forest route reads as trodden dirt before the stones start.
-  out.lerp(DIRT, dirtFactor(x, z) * 0.8);
+  out.lerp(DIRT, dirtFactor(x, z) * 0.86);
 
-  // Plaza, streets and the gate court are pale cobbles under the tiles.
-  out.lerp(COBBLE, pavingFactor(x, z) * 0.85);
+  // Plaza, lanes and the gate court are pale flagstones under the tiles.
+  out.lerp(COBBLE, pavingFactor(x, z) * 0.8);
 
   const gate = Math.min(1, Math.max(0, 1 - Math.hypot(x - TOWN.gate.x, z - TOWN.gate.z) / 9));
-  out.lerp(COURT, gate * 0.35);
+  out.lerp(COURT, gate * 0.32);
 
   const rim = Math.min(1, Math.max(0, (Math.hypot(x, z) - (TOWN.radius - 4)) / 14));
   out.lerp(GRASS_DARK, rim * 0.55);
+
+  // Two wheel ruts down the approach street, painted after the dirt so the road
+  // reads as used rather than as a flat brown band.
+  if (z > 8 && z < 31 && Math.abs(x) < 3) {
+    const rut = 1 - smoothstep(0.08, 0.45, Math.abs(Math.abs(x) - 1.15));
+    out.lerp(DIRT_DARK, rut * 0.32);
+  }
 
   return out;
 }
 
 function createGround(): THREE.Mesh {
   const size = (TOWN.radius + 40) * 2;
-  const geometry = new THREE.PlaneGeometry(size, size, 128, 128);
+  // The town is flat, so a 96² grid is enough for the rolling outskirts; the old
+  // 128² plane spent 32k triangles on ground that never moves.
+  const geometry = new THREE.PlaneGeometry(size, size, 96, 96);
   geometry.rotateX(-Math.PI / 2);
 
   const positions = geometry.getAttribute('position') as THREE.BufferAttribute;
@@ -123,15 +171,17 @@ function mulberry32(seed: number): () => number {
 }
 
 /**
- * Nothing may grow on a street, in a doorway, inside a house or on the sealed
- * court. Checked with a margin so canopies never poke through a roof.
+ * Nothing may grow on a street, in a doorway, inside a house, on the sealed
+ * court or inside the windmill. The margin keeps canopies out of roofs and stops
+ * the treeline from pushing into the lanes.
  */
 function clearOfTown(x: number, z: number, margin: number): boolean {
   if (isInsideBuilding(x, z, margin)) return false;
-  if (Math.hypot(x, z) < TOWN.plaza.radius + margin) return false;
+  if (Math.hypot(x - TOWN.plaza.x, z - TOWN.plaza.z) < TOWN.plaza.radius + margin) return false;
   if (pathDistance(x, z) < margin + 1.8) return false;
-  if (Math.hypot(x - TOWN.gate.x, z - TOWN.gate.z) < 7 + margin) return false;
-  if (Math.hypot(x - TOWN.spawn.x, z - TOWN.spawn.z) < 7 + margin) return false;
+  if (Math.hypot(x - TOWN.gate.x, z - TOWN.gate.z) < 8 + margin) return false;
+  if (Math.hypot(x - TOWN.spawn.x, z - TOWN.spawn.z) < 5 + margin) return false;
+  if (Math.hypot(x - TOWN.windmill.x, z - TOWN.windmill.z) < 4.5 + margin) return false;
   return true;
 }
 
@@ -181,15 +231,29 @@ function scatter(
   return perModel;
 }
 
-/** One InstancedMesh per model mesh, so a whole wall family is one draw call. */
-function groupPlacements(list: TownPlacement[]): Map<string, Placement[]> {
+/** Group town placements by module, ready to bake into merged geometry. */
+function townEntries(
+  list: TownPlacement[],
+  models: Map<string, GLTF>,
+): MergeEntry[] {
   const grouped = new Map<string, Placement[]>();
   for (const { module, ...placement } of list) {
     const bucket = grouped.get(module);
     if (bucket) bucket.push(placement);
     else grouped.set(module, [placement]);
   }
-  return grouped;
+
+  const entries: MergeEntry[] = [];
+  for (const [module, placements] of grouped) {
+    const gltf = models.get(module);
+    if (!gltf) throw new Error(`missing town module ${module}`);
+    entries.push({ gltf, placements });
+  }
+  return entries;
+}
+
+function forestEntries(models: GLTF[], placements: Placement[][]): MergeEntry[] {
+  return models.map((gltf, index) => ({ gltf, placements: placements[index] ?? [] }));
 }
 
 export async function buildWorld(onProgress: (fraction: number, label: string) => void): Promise<World> {
@@ -214,29 +278,31 @@ export async function buildWorld(onProgress: (fraction: number, label: string) =
   );
 
   onProgress(0.3, 'raising the houses…');
-  const wallPlacements: TownPlacement[] = [];
-  for (const building of BUILDINGS) wallPlacements.push(...buildingPlacements(building));
-  for (const [module, placements] of groupPlacements(wallPlacements)) {
-    const gltf = townModels.get(module);
-    if (!gltf) throw new Error(`missing town module ${module}`);
-    group.add(buildInstances(gltf, placements));
+  const solids: TownPlacement[] = [];
+  for (const building of BUILDINGS) solids.push(...buildingPlacements(building));
+  solids.push(...propPlacements());
+
+  // Boulders bed the arch into the hillside instead of leaving it free-standing.
+  for (const [x, z, yaw, scale] of [
+    [GATE.x - 6.8, GATE.z + 2.4, 0.4, 3],
+    [GATE.x + 6.9, GATE.z + 2.1, 1.3, 3.2],
+    [GATE.x - 7.6, GATE.z - 1.4, 2.2, 3.6],
+    [GATE.x + 7.4, GATE.z - 1.6, 0.9, 3.4],
+  ] as const) {
+    solids.push({ module: 'rock-large', x, y: heightAt(x, z) - 0.1, z, yaw, scale });
   }
+
+  // The whole town — walls, roofs, awnings, props, boulders — is static, so it
+  // bakes into one shadow-casting mesh instead of one InstancedMesh per module.
+  group.add(buildMerged(townEntries(solids, townModels), { name: 'town', castShadow: true }));
 
   onProgress(0.44, 'paving the streets…');
-  const paving = groupPlacements(roadPlacements());
-  for (const [module, placements] of paving) {
-    const gltf = townModels.get(module);
-    if (!gltf) throw new Error(`missing town module ${module}`);
-    group.add(buildInstances(gltf, placements, { castShadow: false }));
-  }
-
-  onProgress(0.52, 'setting out the market…');
-  const props = groupPlacements(propPlacements());
-  for (const [module, placements] of props) {
-    const gltf = townModels.get(module);
-    if (!gltf) throw new Error(`missing town module ${module}`);
-    group.add(buildInstances(gltf, placements));
-  }
+  group.add(
+    buildMerged(townEntries(roadPlacements(), townModels), {
+      name: 'paving',
+      castShadow: false,
+    }),
+  );
 
   // ---- forest -----------------------------------------------------------
   const forestNames = [...FOREST.trees, ...FOREST.bushes, ...FOREST.rocks, ...FOREST.grass];
@@ -252,47 +318,40 @@ export async function buildWorld(onProgress: (fraction: number, label: string) =
   const grass = forestModels.slice(FOREST.trees.length + FOREST.bushes.length + FOREST.rocks.length);
 
   const treePlacements = scatter(trees, random, {
-    count: 96,
-    minRadius: 21,
+    // Fewer, larger trees: the same treeline at roughly half the vertices, and
+    // only the trees pay for shadows.
+    count: 48,
+    minRadius: 23.5,
     maxRadius: 56,
-    minScale: 1,
-    maxScale: 1.9,
+    minScale: 1.2,
+    maxScale: 2.1,
     margin: 2.4,
   });
 
-  trees.forEach((model, index) => {
-    const placements = treePlacements[index];
-    if (placements.length) foliage.add(buildInstances(model, placements));
+  const forestTrees = buildMerged(forestEntries(trees, treePlacements), {
+    name: 'forest-trees',
+    castShadow: true,
   });
+  foliage.add(forestTrees);
 
   const bushPlacements = scatter(bushes, random, {
-    count: 54,
-    minRadius: 20,
+    count: 30,
+    minRadius: 16,
     maxRadius: 48,
-    minScale: 0.85,
-    maxScale: 1.6,
+    minScale: 1,
+    maxScale: 1.9,
+    margin: 1.6,
+  });
+  const rockPlacements = scatter(rocks, random, {
+    count: 18,
+    minRadius: 16,
+    maxRadius: 46,
+    minScale: 1,
+    maxScale: 2.4,
     margin: 1.8,
   });
-  bushes.forEach((model, index) => {
-    const placements = bushPlacements[index];
-    if (placements.length) foliage.add(buildInstances(model, placements));
-  });
-
-  const rockPlacements = scatter(rocks, random, {
-    count: 26,
-    minRadius: 18,
-    maxRadius: 46,
-    minScale: 0.9,
-    maxScale: 2.2,
-    margin: 2,
-  });
-  rocks.forEach((model, index) => {
-    const placements = rockPlacements[index];
-    if (placements.length) group.add(buildInstances(model, placements));
-  });
-
   const grassPlacements = scatter(grass, random, {
-    count: 240,
+    count: 90,
     minRadius: 9,
     maxRadius: 46,
     minScale: 0.7,
@@ -300,10 +359,15 @@ export async function buildWorld(onProgress: (fraction: number, label: string) =
     margin: 0.8,
     lift: 0.02,
   });
-  grass.forEach((model, index) => {
-    const placements = grassPlacements[index];
-    if (placements.length) foliage.add(buildInstances(model, placements));
-  });
+
+  // Bushes, rocks and tufts share the forest atlas; one merged, non-shadow-casting
+  // mesh keeps the understory out of the shadow pass entirely.
+  group.add(
+    buildMerged(
+      [...forestEntries(bushes, bushPlacements), ...forestEntries(rocks, rockPlacements), ...forestEntries(grass, grassPlacements)],
+      { name: 'understory', castShadow: false },
+    ),
+  );
 
   // ---- sealed gate ------------------------------------------------------
   onProgress(0.9, 'sealing the old stair…');
@@ -317,42 +381,60 @@ export async function buildWorld(onProgress: (fraction: number, label: string) =
     loadDungeon(DUNGEON.crates),
   ]);
 
-  // Flagged court in front of the arch, on the plateau.
-  for (const dx of [-2, 2]) {
-    for (const dz of [1.6, 3.6]) {
-      group.add(placeModel(floorGltf, GATE.x + dx, gateY + 0.08, GATE.z + dz, 0, 1));
-    }
-  }
-
-  const archY = gateY + 0.13;
-  group.add(placeModel(doorwayGltf, GATE.x, archY, GATE.z - 0.5, 0, 1));
-  // The plug: a solid wall inside the arch. The dungeon can open this later.
-  group.add(placeModel(wallGltf, GATE.x, archY, GATE.z - 1.55, 0, 1));
-  // Wings butt directly against the 4 m arch, so there is no gap to see through.
-  group.add(placeModel(wallGltf, GATE.x - 4, archY, GATE.z - 0.5, 0, 1));
-  group.add(placeModel(wallGltf, GATE.x + 4, archY, GATE.z - 0.5, 0, 1));
+  const gateStone: MergeEntry[] = [
+    {
+      gltf: floorGltf,
+      placements: [-2, 2].flatMap((dx) =>
+        [1.6, 3.6, 5.6].map((dz) => ({ x: GATE.x + dx, y: gateY + 0.08, z: GATE.z + dz, yaw: 0, scale: 1 })),
+      ),
+    },
+    {
+      gltf: wallGltf,
+      placements: [
+        // The plug: a solid wall inside the arch. The dungeon can open this later.
+        { x: GATE.x, y: gateY + 0.13, z: GATE.z - 1.55, yaw: 0, scale: 1 },
+        // Wings butt directly against the 4 m arch, so there is no gap to see through.
+        { x: GATE.x - 4, y: gateY + 0.13, z: GATE.z - 0.5, yaw: 0, scale: 1 },
+        { x: GATE.x + 4, y: gateY + 0.13, z: GATE.z - 0.5, yaw: 0, scale: 1 },
+      ],
+    },
+    {
+      gltf: doorwayGltf,
+      placements: [{ x: GATE.x, y: gateY + 0.13, z: GATE.z - 0.5, yaw: 0, scale: 1 }],
+    },
+    {
+      gltf: pillarGltf,
+      placements: GATE.pillars.map((pillar) => ({ x: pillar.x, y: gateY, z: pillar.z, yaw: 0, scale: 1 })),
+    },
+    {
+      gltf: cratesGltf,
+      placements: [{ x: GATE.x + 2.6, y: gateY + 0.1, z: GATE.z + 2.2, yaw: 0.4, scale: 1 }],
+    },
+  ];
+  group.add(buildMerged(gateStone, { name: 'gate-stone', castShadow: true }));
+  group.add(
+    buildMerged(
+      [
+        {
+          gltf: torchGltf,
+          placements: GATE.pillars.map((pillar) => ({
+            x: pillar.x,
+            y: gateY + 2.4,
+            z: pillar.z,
+            yaw: 0,
+            scale: 1,
+          })),
+        },
+      ],
+      { name: 'gate-torches', castShadow: false },
+    ),
+  );
 
   for (const pillar of GATE.pillars) {
-    group.add(placeModel(pillarGltf, pillar.x, gateY, pillar.z, 0, 1));
-    group.add(placeModel(torchGltf, pillar.x, gateY + 2.4, pillar.z, 0, 1));
-
     const light = new THREE.PointLight(0xffb268, 8, 13, 2);
     light.position.set(pillar.x, gateY + 2.9, pillar.z);
     group.add(light);
   }
-
-  group.add(placeModel(cratesGltf, GATE.x + 2.6, gateY + 0.1, GATE.z + 2.2, 0.4, 1));
-
-  // Boulders bed the arch into the hillside instead of leaving it free-standing.
-  const boulderGltf = await loadTown('rock-large');
-  group.add(
-    buildInstances(boulderGltf, [
-      { x: GATE.x - 6.8, y: heightAt(GATE.x - 6.8, GATE.z + 2.4) - 0.1, z: GATE.z + 2.4, yaw: 0.4, scale: 3 },
-      { x: GATE.x + 6.9, y: heightAt(GATE.x + 6.9, GATE.z + 2.1) - 0.1, z: GATE.z + 2.1, yaw: 1.3, scale: 3.2 },
-      { x: GATE.x - 7.6, y: heightAt(GATE.x - 7.6, GATE.z - 1.4) - 0.1, z: GATE.z - 1.4, yaw: 2.2, scale: 3.6 },
-      { x: GATE.x + 7.4, y: heightAt(GATE.x + 7.4, GATE.z - 1.6) - 0.1, z: GATE.z - 1.6, yaw: 0.9, scale: 3.4 },
-    ]),
-  );
 
   // ---- collision --------------------------------------------------------
   const blockers = townBlockers();

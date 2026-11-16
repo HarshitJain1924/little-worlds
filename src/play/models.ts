@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import type { GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 
 /** Curated runtime set copied from the KayKit packs into public/rpg/. */
 export const ASSETS = {
@@ -163,8 +164,129 @@ export function buildInstances(
   return group;
 }
 
-/** A single placed copy (ruin modules, unique props). */
-export function placeModel(
+export interface MergeEntry {
+  gltf: GLTF;
+  placements: Placement[];
+}
+
+export interface MergeOptions {
+  castShadow?: boolean;
+  receiveShadow?: boolean;
+  name?: string;
+}
+
+interface SourcePart {
+  geometry: THREE.BufferGeometry;
+  matrix: THREE.Matrix4;
+  key: string;
+  material: THREE.Material;
+}
+
+/**
+ * Materials are only merged when they render identically. Every Fantasy Town
+ * module shares the same `colormap` material, so the whole town collapses into
+ * one mesh per shadow policy; models from other packs (the dungeon torches) keep
+ * their own material and therefore their own draw.
+ */
+function materialKey(material: THREE.Material): string {
+  const standard = material as THREE.MeshStandardMaterial;
+  return [
+    material.name,
+    material.type,
+    standard.map ? 'map' : 'flat',
+    standard.emissiveMap ? 'emissiveMap' : '',
+    standard.emissive ? standard.emissive.getHexString() : '',
+    material.transparent ? 'transparent' : 'opaque',
+  ].join('|');
+}
+
+function sourceParts(gltf: GLTF): SourcePart[] {
+  gltf.scene.updateMatrixWorld(true);
+  const parts: SourcePart[] = [];
+  gltf.scene.traverse((child) => {
+    const mesh = child as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    const material = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+    if (!material) return;
+    parts.push({
+      geometry: mesh.geometry,
+      matrix: mesh.matrixWorld.clone(),
+      key: materialKey(material),
+      material,
+    });
+  });
+  return parts;
+}
+
+function placementMatrix(placement: Placement, target: THREE.Matrix4): THREE.Matrix4 {
+  position.set(placement.x, placement.y, placement.z);
+  quaternion.setFromAxisAngle(UP, placement.yaw);
+  scale.set(placement.scale, placement.scale, placement.scale * (placement.stretchZ ?? 1));
+  return target.compose(position, quaternion, scale);
+}
+
+/**
+ * Bake every placement of every entry into one static mesh per material.
+ *
+ * Instancing keeps repeated modules cheap, but one InstancedMesh per module (and
+ * one per multi-primitive module) still costs a draw in the shadow pass and keeps
+ * the whole town in every frame. The town is static, so merging it trades a few
+ * hundred thousand bytes of geometry for a 2–3 draw town and a single shadow
+ * draw. Instanced bounding spheres that covered the whole map also disappear.
+ */
+export function buildMerged(entries: MergeEntry[], options: MergeOptions = {}): THREE.Group {
+  const buckets = new Map<string, { material: THREE.Material; geometries: THREE.BufferGeometry[] }>();
+
+  for (const entry of entries) {
+    if (!entry.placements.length) continue;
+    for (const part of sourceParts(entry.gltf)) {
+      let bucket = buckets.get(part.key);
+      if (!bucket) {
+        bucket = { material: part.material, geometries: [] };
+        buckets.set(part.key, bucket);
+      }
+
+      for (const placement of entry.placements) {
+        // Cloning to non-indexed gives every buffer the same attribute layout,
+        // which is what mergeGeometries needs; skinning/tangent attributes are
+        // dropped because the kit is not normal-mapped.
+        const geometry = part.geometry.index ? part.geometry.toNonIndexed() : part.geometry.clone();
+        for (const attribute of Object.keys(geometry.attributes)) {
+          if (attribute !== 'position' && attribute !== 'normal' && attribute !== 'uv') {
+            geometry.deleteAttribute(attribute);
+          }
+        }
+
+        const count = geometry.getAttribute('position').count;
+        if (!geometry.getAttribute('normal')) geometry.computeVertexNormals();
+        if (!geometry.getAttribute('uv')) {
+          geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(count * 2), 2));
+        }
+
+        geometry.applyMatrix4(placementMatrix(placement, new THREE.Matrix4()).multiply(part.matrix));
+        bucket.geometries.push(geometry);
+      }
+    }
+  }
+
+  const group = new THREE.Group();
+  group.name = options.name ?? 'merged';
+
+  for (const bucket of buckets.values()) {
+    const merged = mergeGeometries(bucket.geometries, false);
+    for (const geometry of bucket.geometries) geometry.dispose();
+    if (!merged) continue;
+
+    const mesh = new THREE.Mesh(merged, bucket.material);
+    mesh.castShadow = options.castShadow ?? true;
+    mesh.receiveShadow = options.receiveShadow ?? true;
+    group.add(mesh);
+  }
+
+  return group;
+}
+
+/** A single placed copy (ruin modules, unique props). */export function placeModel(
   gltf: GLTF,
   x: number,
   y: number,

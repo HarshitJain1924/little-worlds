@@ -11,6 +11,7 @@ import {
   TOWN_PROPS,
   buildingFootprint,
   buildingHeight,
+  buildingById,
   buildingPlacements,
   dirtFactor,
   footprintOf,
@@ -48,7 +49,7 @@ function pathGap(x: number, z: number, path: PathSpec): number {
   return best;
 }
 
-test('the spawn is safe, level and on the south street', () => {
+test('the spawn is safe, level and on the approach street', () => {
   const { x, z } = TOWN.spawn;
 
   assert.ok(Math.hypot(x, z) < TOWN.radius - 10, 'spawn is inside the playable bowl');
@@ -68,7 +69,7 @@ test('the spawn is safe, level and on the south street', () => {
     assert.equal(insideBlocker(blocker, x, z, 1.5), false, 'spawn is clear of solid props');
   }
 
-  // Readable at a glance: the nearest building is far enough to see the square.
+  // Readable at a glance: the nearest building is far enough to see the street.
   for (const building of BUILDINGS) {
     const footprint = buildingFootprint(building);
     const dx = Math.max(footprint.minX - x, 0, x - footprint.maxX);
@@ -313,11 +314,15 @@ test('walls and roofs line up with the building layout', () => {
       assert.ok(level >= 0 && level < building.levels, `${building.id} wall floats at the wrong level`);
     }
 
-    const roofs = placements.filter((placement) => placement.module.startsWith('roof-high-gable'));
+    // Roofs are the modules covering the building, not the door awnings.
+    const roofs = placements.filter(
+      (placement) => placement.module.startsWith('roof-') && placement.module !== 'roof-high',
+    );
     assert.equal(roofs.length, building.ridge === 'x' ? building.width : building.depth);
     for (const roof of roofs) {
       assert.ok(Math.abs(roof.y - (ground + building.levels * TILE)) < 1e-6);
       assert.ok((roof.stretchZ ?? 0) >= (building.ridge === 'x' ? building.depth : building.width));
+      assert.ok(roof.module.includes('roof-'));
     }
 
     for (const placement of placements) {
@@ -329,6 +334,58 @@ test('walls and roofs line up with the building layout', () => {
   }
 });
 
+test('the spawn view reads as a town, not a validation grid', () => {
+  const spawn = TOWN.spawn;
+  const footprint = (building: (typeof BUILDINGS)[number]) => buildingFootprint(building);
+
+  // Houses frame both sides of the approach within sight of the spawn.
+  const near = (building: (typeof BUILDINGS)[number]): boolean => {
+    const box = footprint(building);
+    const dz = Math.max(box.minZ - spawn.z, 0, spawn.z - box.maxZ);
+    return dz < 12;
+  };
+  assert.ok(
+    BUILDINGS.some((building) => footprint(building).maxX < -1.5 && near(building)),
+    'nothing frames the left of the approach',
+  );
+  assert.ok(
+    BUILDINGS.some((building) => footprint(building).minX > 1.5 && near(building)),
+    'nothing frames the right of the approach',
+  );
+
+  // The square and fountain are straight ahead and the sightline is clear.
+  for (let step = 0; step <= 50; step += 1) {
+    const z = spawn.z + ((TOWN.plaza.z - spawn.z) * step) / 50;
+    assert.equal(isInsideBuilding(0, z, 0), false, 'a building blocks the view of the square');
+  }
+
+  // The guild is the landmark: the tallest ridge on the far side of the square.
+  const guild = buildingById('guild');
+  const others = BUILDINGS.filter((building) => building.id !== 'guild').map(buildingHeight);
+  assert.ok(buildingHeight(guild) > Math.max(...others) + 1.5, 'the guild has no landmark silhouette');
+  assert.ok(Math.abs(guild.x) < 8, 'the guild is off the view axis');
+  assert.ok(spawn.z - guild.z < 50, 'the guild is too far to read from the spawn');
+
+  // Market cluster: several stalls gather in the square around the fountain.
+  assert.ok(
+    TOWN_PROPS.filter((prop) => prop.kind.startsWith('stall-') && prop.solid && Math.hypot(prop.x, prop.z) < TOWN.plaza.radius)
+      .length >= 3,
+    'the market is not a cluster',
+  );
+
+  // Variety: both roof palettes, both pitches, more than one façade module.
+  assert.ok(BUILDINGS.some((building) => building.roof.startsWith('red')));
+  assert.ok(BUILDINGS.some((building) => building.roof.startsWith('teal')));
+  assert.ok(new Set(BUILDINGS.map((building) => building.levels)).size >= 2);
+  assert.ok(new Set(BUILDINGS.map((building) => building.roof)).size >= 3);
+
+  for (const building of BUILDINGS) {
+    const placements = buildingPlacements(building);
+    assert.ok(placements.some((placement) => placement.module.includes('window')), `${building.id} has no window`);
+    assert.ok(placements.some((placement) => placement.module.includes('door')), `${building.id} has no door`);
+  }
+});
+
 test('the town kit is present in public assets', () => {
   for (const module of TOWN_MODULES) {
     assert.ok(existsSync(`public/rpg/town/${module}.glb`), `missing public/rpg/town/${module}.glb`);
@@ -337,21 +394,22 @@ test('the town kit is present in public assets', () => {
 });
 
 test('the plaza, streets and forest route read as different ground', () => {
-  assert.ok(pavingFactor(0, 4) > 0.9, 'plaza is paved');
-  assert.ok(pavingFactor(TOWN.spawn.x, TOWN.spawn.z) > 0.5, 'the approach street is paved');
+  assert.ok(pavingFactor(0, 4) > 0.9, 'the square is paved');
+  assert.ok(dirtFactor(TOWN.spawn.x, TOWN.spawn.z) > 0.9, 'the approach is dirt, not a grey carpet');
+  assert.ok(pavingFactor(TOWN.spawn.x, TOWN.spawn.z) < 0.2, 'the approach is not one continuous grey strip');
+  assert.ok(dirtFactor(-15, 13.5) > 0.9, 'the forest route is trodden dirt');
   assert.ok(pavingFactor(8, 15) < 0.2, 'open grass stays grass');
-  assert.ok(dirtFactor(-13.6, 9.4) > 0.9, 'the forest route is trodden dirt');
   assert.equal(dirtFactor(0, 4), 0, 'the plaza is not dirt');
 });
 
 test('the road tiles follow the street network without crossing walls', () => {
   const tiles = roadPlacements();
-  assert.ok(tiles.length > 60, 'the plaza and streets are paved');
+  assert.ok(tiles.length > 40, 'the square and the door thresholds are paved');
   for (const tile of tiles) {
     assert.equal(tile.module, 'road');
     assert.equal(tile.scale, TILE);
     assert.equal(isInsideBuilding(tile.x, tile.z, 0.1), false);
     assert.ok(Math.abs(tile.y - heightAt(tile.x, tile.z) - 0.045) < 1e-6);
   }
-  assert.ok(propPlacements().length >= 25);
+  assert.ok(propPlacements().length >= 30);
 });

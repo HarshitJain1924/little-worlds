@@ -2,8 +2,18 @@
  * Layout and terrain for the first town.
  *
  * Everything here is plain data plus closed-form geometry: no three.js, no DOM.
- * `world.ts` turns these placements into instanced meshes, while the tests can
- * check spawn safety, footprints and connectivity directly.
+ * `world.ts` merges these placements into a handful of static meshes, while the
+ * tests can check spawn safety, footprints and connectivity directly.
+ *
+ * Composition intent (the spawn view is the design reference)
+ * - The spawn looks north up a trodden dirt street. The Weaver's Loft closes the
+ *   left of frame, the inn the right, and the street narrows between them before
+ *   opening onto the square.
+ * - The square is the heart: a stone fountain, a row of market stalls facing it,
+ *   a market tree and lantern posts, with the three-storey guild hall rising
+ *   behind the north side as the landmark.
+ * - The lane between the guild and the storehouse leads to the sealed gate, so
+ *   the route spawn → plaza → guild → dungeon reads as one line.
  *
  * Conventions
  * - The kit (Kenney Fantasy Town) is authored on a 1 m grid; `TILE` is the town
@@ -16,8 +26,10 @@ import type { CameraObstacle } from './collision';
 
 export const TILE = 2;
 
-/** Ridge height above the eaves, measured from the kit's `roof-high-gable`. */
-export const ROOF_RISE = 1.16 * TILE;
+/** Ridge height above the eaves, for the tall red roofs. */
+export const ROOF_RISE = 2.4;
+/** Ridge height of the low teal roofs. Pitch is part of a building's identity. */
+const LOW_ROOF_RISE = 1.2;
 
 export interface Vec2 {
   x: number;
@@ -28,11 +40,11 @@ export const TOWN = {
   /** Playable edge: enemies leash inside this, the ground rim rises beyond it. */
   radius: 40,
   seed: 20261116,
-  /** South gate, on the approach street, looking north at the plaza. */
-  spawn: { x: 0, z: 23 },
-  plaza: { x: 0, z: 0, radius: 7.6 },
+  /** South end of the approach street, looking north at the plaza. */
+  spawn: { x: 0, z: 27 },
+  plaza: { x: 0, z: 0, radius: 8.2 },
   /** Sealed ancient entrance beyond the last houses. */
-  gate: { x: 0, z: -29 },
+  gate: { x: 0, z: -32 },
   windmill: { x: -23, z: -19 },
 } as const;
 
@@ -55,29 +67,30 @@ function rolling(x: number, z: number): number {
 }
 
 /**
- * Walkable height field. The plaza, every building site and the street grid sit
- * on flat ground (height 0), the sealed gate stands on its own raised plateau,
- * and the rim beyond the playable edge lifts into the treeline so the boundary
- * reads as terrain rather than an invisible wall.
+ * Walkable height field. Every building site and the whole street network sit
+ * on flat ground, the sealed gate stands on its own raised plateau, and the rim
+ * beyond the playable edge lifts into the treeline so the boundary reads as
+ * terrain rather than an invisible wall.
  */
 export function heightAt(x: number, z: number): number {
   const r = Math.hypot(x - TOWN.plaza.x, z - TOWN.plaza.z);
-  const town = 1 - smoothstep(19, 30, r);
-  const spawn = 1 - smoothstep(5, 13, Math.hypot(x - TOWN.spawn.x, z - TOWN.spawn.z));
+  // Flat out to the last building (storehouse corner is ~23.5 m out).
+  const town = 1 - smoothstep(23, 32, r);
+  const spawn = 1 - smoothstep(5, 14, Math.hypot(x - TOWN.spawn.x, z - TOWN.spawn.z));
 
-  // The gate terrace rises north of the last house, over the whole width of the
+  // The gate terrace rises north of the storehouse, over the whole width of the
   // arch, so the sealed court is level and the town itself never tilts.
   const terrace =
-    smoothstep(-19.5, -24.5, z) * smoothstep(20, 9, Math.abs(x - TOWN.gate.x));
+    smoothstep(-23, -28.5, z) * smoothstep(20, 9, Math.abs(x - TOWN.gate.x));
 
-  // Two banks: a wooded rise right past the playable edge, then a farther ridge
-  // that hides the end of the ground mesh from every street in town.
-  const rim = smoothstep(35, 50, r);
-  const farRim = smoothstep(50, 72, r);
+  // A wooded bank right past the playable edge, then a farther ridge that hides
+  // the end of the ground mesh from every street in town.
+  const rim = smoothstep(34, 48, r);
+  const farRim = smoothstep(48, 70, r);
 
-  const open = (1 - town) * (1 - terrace) * (1 - 0.85 * spawn);
+  const open = (1 - town) * (1 - terrace) * (1 - 0.9 * spawn);
 
-  return rolling(x, z) * open + 2.4 * terrace + rim * 3.4 + farRim * 5.5;
+  return rolling(x, z) * open + 2.4 * terrace + rim * 3.2 + farRim * 5.6;
 }
 
 // ---------------------------------------------------------------------------
@@ -93,22 +106,31 @@ export interface PathSpec {
 }
 
 /**
- * The street network. Every building door opens onto one of these spurs, so the
- * town reads as streets between houses instead of houses on a lawn.
+ * The street network. The approach is dirt with a stone apron at the square;
+ * lanes and thresholds are flagged so the ground reads as a lived-in town
+ * instead of one continuous grey carpet. Every building has its own spur.
  */
 export const PATHS: PathSpec[] = [
-  { points: [{ x: 0, z: 27 }, { x: 0, z: 8 }], width: 5, kind: 'stone' },
-  { points: [{ x: 0, z: -7 }, { x: 0, z: -9.4 }], width: 4.4, kind: 'stone' },
-  { points: [{ x: 0, z: -9.4 }, { x: -3.2, z: -10.7 }], width: 3.4, kind: 'stone' },
-  { points: [{ x: 6.6, z: -1 }, { x: 11.2, z: -1.5 }], width: 4.2, kind: 'stone' },
-  { points: [{ x: -6.6, z: -1 }, { x: -11.2, z: -2.5 }], width: 4.2, kind: 'stone' },
-  { points: [{ x: 5.8, z: 5 }, { x: 7.4, z: 8.9 }], width: 3.4, kind: 'stone' },
-  { points: [{ x: -5.8, z: 5 }, { x: -7.4, z: 8.6 }], width: 3.4, kind: 'stone' },
-  { points: [{ x: 9.4, z: -1.3 }, { x: 10.3, z: -10.4 }], width: 3.2, kind: 'stone' },
-  { points: [{ x: -9.6, z: -2 }, { x: -10.4, z: -11 }], width: 3.2, kind: 'stone' },
-  { points: [{ x: 2.6, z: -9.4 }, { x: 4.2, z: -13.8 }, { x: 3.2, z: -19.6 }, { x: 0.8, z: -23.8 }, { x: 0, z: -25.6 }], width: 3.2, kind: 'stone' },
-  { points: [{ x: 4.2, z: -17.2 }, { x: 5, z: -17.4 }], width: 3, kind: 'stone' },
-  { points: [{ x: -6.9, z: 1.2 }, { x: -10.2, z: 5 }, { x: -13.6, z: 9.4 }, { x: -18, z: 15 }, { x: -22, z: 21 }], width: 3.4, kind: 'dirt' },
+  // Approach street and the apron where it opens into the square.
+  { points: [{ x: 0, z: 31 }, { x: 0, z: 9 }], width: 4.6, kind: 'dirt' },
+  { points: [{ x: 0, z: 9 }, { x: 0, z: 7.4 }], width: 4.6, kind: 'stone' },
+
+  // Door thresholds.
+  { points: [{ x: -2.1, z: 20.5 }, { x: -3.4, z: 20.5 }], width: 2.2, kind: 'stone' },
+  { points: [{ x: 2.0, z: 18.5 }, { x: 3.4, z: 18.5 }], width: 2.2, kind: 'stone' },
+  { points: [{ x: -2.1, z: 13.5 }, { x: -5.0, z: 13.5 }], width: 2.2, kind: 'dirt' },
+  { points: [{ x: 2.0, z: 11.5 }, { x: 4.6, z: 11.5 }], width: 2.2, kind: 'dirt' },
+  { points: [{ x: -4.5, z: -8.0 }, { x: -4.5, z: -11.1 }], width: 3.6, kind: 'stone' },
+  { points: [{ x: -7.0, z: -3.6 }, { x: -11.1, z: -4.5 }], width: 3, kind: 'dirt' },
+  { points: [{ x: 6.6, z: -5.6 }, { x: 9.1, z: -8.2 }], width: 2.6, kind: 'dirt' },
+  { points: [{ x: 3.6, z: -19.5 }, { x: 5.0, z: -19.5 }], width: 2.4, kind: 'dirt' },
+  { points: [{ x: -6.2, z: -7.0 }, { x: -10.6, z: -12.4 }, { x: -11.1, z: -13.1 }], width: 2.6, kind: 'dirt' },
+
+  // Paved lane between guild and storehouse, climbing to the sealed gate.
+  { points: [{ x: 2.6, z: -7.6 }, { x: 3.6, z: -12 }, { x: 3.6, z: -17.8 }, { x: 2.4, z: -23 }, { x: 0.4, z: -28.8 }], width: 3.4, kind: 'stone' },
+
+  // Trodden way out to the woods, between the smithy and the cottages.
+  { points: [{ x: -6.6, z: 4.8 }, { x: -10.5, z: 8.6 }, { x: -15, z: 13.5 }, { x: -20, z: 19.5 }], width: 3, kind: 'dirt' },
 ];
 
 export interface NearestPath {
@@ -160,7 +182,7 @@ export function pavingFactor(x: number, z: number): number {
   return Math.max(plaza, street, gate);
 }
 
-/** 1 on trodden dirt (the forest route), 0 elsewhere. */
+/** 1 on trodden dirt (the approach street and forest routes), 0 elsewhere. */
 export function dirtFactor(x: number, z: number): number {
   const near = nearestPath(x, z);
   if (near.path.kind !== 'dirt') return 0;
@@ -172,6 +194,7 @@ export function dirtFactor(x: number, z: number): number {
 // ---------------------------------------------------------------------------
 
 export type BuildingTone = 'plaster' | 'timber';
+export type RoofStyle = 'red' | 'red-detail' | 'teal' | 'teal-detail';
 
 export interface BuildingSpec {
   id: string;
@@ -186,125 +209,153 @@ export interface BuildingSpec {
   tone: BuildingTone;
   /** Direction the ridge runs in the building's local frame. */
   ridge: 'x' | 'z';
-  roof: 'gable' | 'detail';
+  roof: RoofStyle;
   chimney?: boolean;
-  /** Open lean-to workshop along the local +X wall. */
-  awning?: boolean;
+  /** Upper floors overhang the street by 30 cm. */
+  jetty?: boolean;
+  /** Small tiled awning over the door. */
+  canopy?: boolean;
+  /** Open lean-to forge yard on the local -X wall. */
+  forge?: boolean;
+  /** Guild porch: posts, tiled canopy and paired banners. */
+  portico?: boolean;
 }
 
 /**
- * Eight buildings around the plaza. The guild closes the north side, the tavern
- * and smith face each other across the east-west lane, and the homes are tucked
- * behind the market with a storehouse behind the guild.
+ * Nine buildings around the square. The guild hall closes the north side and is
+ * the tallest silhouette; the inn and weaver frame the approach; the smithy and
+ * market share the west/east edges; homes and the storehouse fill the lanes.
+ * Roofs alternate red/teal, ridges alternate x/z, and heights stagger 1–3 floors
+ * so the skyline never reads as a row of identical boxes.
  */
 export const BUILDINGS: BuildingSpec[] = [
   {
     id: 'guild',
     label: 'Adventurers’ Guild',
-    x: -3.5,
-    z: -13,
+    x: -4.5,
+    z: -14.5,
     yaw: 0,
-    width: 3,
-    depth: 2,
-    levels: 2,
+    width: 4,
+    depth: 3,
+    levels: 3,
     tone: 'plaster',
     ridge: 'x',
-    roof: 'detail',
+    roof: 'red-detail',
     chimney: true,
+    portico: true,
   },
   {
-    id: 'tavern',
+    id: 'inn',
     label: 'The Wandering Lantern',
-    x: 13.5,
-    z: -1.5,
+    x: 5.8,
+    z: 18.5,
     yaw: -Math.PI / 2,
     width: 3,
     depth: 2,
     levels: 2,
     tone: 'timber',
-    ridge: 'z',
-    roof: 'detail',
+    ridge: 'x',
+    roof: 'red',
     chimney: true,
+    jetty: true,
+    canopy: true,
   },
   {
-    id: 'blacksmith',
+    id: 'weaver',
+    label: 'Weaver’s Loft',
+    x: -5.8,
+    z: 20.5,
+    yaw: Math.PI / 2,
+    width: 3,
+    depth: 2,
+    levels: 2,
+    tone: 'plaster',
+    ridge: 'z',
+    roof: 'teal',
+    jetty: true,
+    canopy: true,
+  },
+  {
+    id: 'smithy',
     label: 'Smithy',
     x: -13.5,
-    z: -2.5,
+    z: -4.5,
     yaw: Math.PI / 2,
     width: 2,
     depth: 2,
     levels: 1,
     tone: 'timber',
     ridge: 'x',
-    roof: 'gable',
-    awning: true,
+    roof: 'teal',
+    chimney: true,
+    forge: true,
   },
   {
-    id: 'house-a',
-    label: 'Weaver’s House',
-    x: -9.5,
-    z: 9,
+    id: 'cottage-a',
+    label: 'Cobbler’s Cottage',
+    x: -7.4,
+    z: 13.5,
     yaw: Math.PI / 2,
-    width: 2,
-    depth: 2,
-    levels: 2,
-    tone: 'plaster',
-    ridge: 'z',
-    roof: 'gable',
-  },
-  {
-    id: 'house-b',
-    label: 'Fisher’s House',
-    x: 9.5,
-    z: 9.5,
-    yaw: -Math.PI / 2,
     width: 2,
     depth: 2,
     levels: 1,
     tone: 'plaster',
+    ridge: 'z',
+    roof: 'teal-detail',
+  },
+  {
+    id: 'cottage-b',
+    label: 'Fisher’s Cottage',
+    x: 7.0,
+    z: 11.5,
+    yaw: -Math.PI / 2,
+    width: 2,
+    depth: 2,
+    levels: 1,
+    tone: 'timber',
     ridge: 'x',
-    roof: 'gable',
+    roof: 'red',
     chimney: true,
   },
   {
     id: 'house-c',
     label: 'Hunter’s House',
-    x: 12.5,
-    z: -11,
+    x: 11.5,
+    z: -8.5,
     yaw: -Math.PI / 2,
     width: 2,
     depth: 2,
     levels: 2,
-    tone: 'timber',
-    ridge: 'x',
-    roof: 'detail',
-  },
-  {
-    id: 'house-d',
-    label: 'Woodcutter’s House',
-    x: -12.5,
-    z: -11.5,
-    yaw: Math.PI / 2,
-    width: 2,
-    depth: 2,
-    levels: 1,
-    tone: 'timber',
+    tone: 'plaster',
     ridge: 'z',
-    roof: 'gable',
+    roof: 'teal',
+    jetty: true,
   },
   {
     id: 'storehouse',
     label: 'Storehouse',
-    x: 7.2,
-    z: -17.5,
+    x: 7.4,
+    z: -19.5,
     yaw: -Math.PI / 2,
     width: 2,
     depth: 2,
     levels: 1,
-    tone: 'plaster',
+    tone: 'timber',
     ridge: 'x',
-    roof: 'gable',
+    roof: 'red',
+  },
+  {
+    id: 'cottage-c',
+    label: 'Woodcutter’s Cottage',
+    x: -13.5,
+    z: -13.5,
+    yaw: Math.PI / 2,
+    width: 2,
+    depth: 2,
+    levels: 2,
+    tone: 'timber',
+    ridge: 'z',
+    roof: 'red',
   },
 ];
 
@@ -369,9 +420,16 @@ export function doorPoint(building: BuildingSpec): Vec2 {
   return { x: building.x + local.x, z: building.z + local.z };
 }
 
+const roofRise = (roof: RoofStyle): number => {
+  if (roof === 'red') return ROOF_RISE;
+  if (roof === 'red-detail') return 2.6;
+  if (roof === 'teal') return LOW_ROOF_RISE;
+  return 1.4;
+};
+
 /** Wall top plus roof ridge, used for camera proxies and tests. */
 export function buildingHeight(building: BuildingSpec): number {
-  return building.levels * TILE + ROOF_RISE;
+  return building.levels * TILE + roofRise(building.roof);
 }
 
 // ---------------------------------------------------------------------------
@@ -389,25 +447,21 @@ export interface TownPlacement {
   stretchZ?: number;
 }
 
-const frontModule = (building: BuildingSpec, level: number, index: number): string => {
-  if (level === 0) return building.tone === 'timber' ? 'wall-wood' : 'wall';
-  return index % 2 === 0 ? 'wall-wood-window-small' : 'wall-wood';
-};
-
-const backModule = (building: BuildingSpec, level: number, index: number): string => {
-  if (level === 0) return building.tone === 'timber' ? 'wall-wood' : 'wall';
-  return index === Math.floor(building.width / 2) ? 'wall-wood-window-small' : 'wall-wood';
-};
-
-const sideModule = (building: BuildingSpec, level: number, index: number): string => {
-  if (level === 0) return building.tone === 'timber' ? 'wall-wood' : 'wall';
-  return index === Math.floor(building.depth / 2) ? 'wall-wood-window-small' : 'wall-wood';
+const ROOF_MODULE: Record<RoofStyle, string> = {
+  red: 'roof-high-gable',
+  'red-detail': 'roof-high-gable-detail',
+  teal: 'roof-gable',
+  'teal-detail': 'roof-gable-detail',
 };
 
 /**
- * Walls and roof for one building, in world space. Walls tile on the 2 m grid:
- * front and back walls span the full width, side walls close the ends, and the
- * ridge row covers the footprint with a slight eave overhang.
+ * Walls and roof for one building, in world space.
+ *
+ * Façade rhythm: the door sits in the front wall with a shuttered window beside
+ * it, upper floors alternate plain and glassed panels and finish in timber-cross
+ * panels at the corners, and the guild gets stone-framed windows all the way up.
+ * Upper floors can jetty out by 30 cm, and the roof pitch is chosen per building
+ * so red steep roofs and low teal roofs break the skyline.
  */
 export function buildingPlacements(building: BuildingSpec): TownPlacement[] {
   const out: TownPlacement[] = [];
@@ -415,9 +469,11 @@ export function buildingPlacements(building: BuildingSpec): TownPlacement[] {
   const halfW = (building.width * TILE) / 2;
   const halfD = (building.depth * TILE) / 2;
   const doorIndex = Math.floor((building.width - 1) / 2);
-  // Closed door panels: the town has no interiors yet, so a solid door reads
-  // better than looking into an empty shell.
+  const doorX = -halfW + TILE / 2 + doorIndex * TILE;
+  const last = building.width - 1;
   const door = building.tone === 'timber' ? 'wall-wood-door' : 'wall-door';
+  const plain = building.tone === 'timber' ? 'wall-wood' : 'wall';
+  const upper = building.tone === 'timber' ? 'wall' : 'wall-wood';
 
   const put = (
     module: string,
@@ -440,48 +496,111 @@ export function buildingPlacements(building: BuildingSpec): TownPlacement[] {
     });
   };
 
+  const groundFront = (index: number): string => {
+    if (index === doorIndex) return door;
+    if (building.id === 'guild') {
+      return index === 0 || index === last ? 'wall-detail-cross' : 'wall-window-stone';
+    }
+    if (building.width === 2) return 'wall-window-shutters';
+    if (index === 0) return 'wall-window-shutters';
+    if (index === last) return 'wall-detail-cross';
+    return 'wall-window-shutters';
+  };
+
+  const upperFront = (level: number, index: number): string => {
+    if (building.id === 'guild') {
+      if (index === 0 || index === last) return 'wall-detail-cross';
+      return index % 2 === 0 ? 'wall-window-stone' : 'wall-wood-window-small';
+    }
+    if (building.id === 'inn' && level === 1 && index === doorIndex) return 'wall-window-round';
+    if (index === 0 || index === last) return 'wall-detail-cross';
+    return index % 2 === 0 ? 'wall-wood-window-small' : upper;
+  };
+
   for (let level = 0; level < building.levels; level += 1) {
     const y = ground + level * TILE;
+    // The upper storeys lean out over the street; the roof follows the outer face.
+    const grow = building.jetty && level > 0 ? 0.3 : 0;
+    const frontZ = halfD - TILE / 2 + grow;
+    const backZ = -halfD + TILE / 2 - grow;
+    const sideX = halfW - TILE / 2 + grow;
 
     for (let i = 0; i < building.width; i += 1) {
       const localX = -halfW + TILE / 2 + i * TILE;
-      const front = level === 0 && i === doorIndex ? door : frontModule(building, level, i);
-      put(front, localX, halfD - TILE / 2, y, -Math.PI / 2, TILE);
-      put(backModule(building, level, i), localX, -halfD + TILE / 2, y, Math.PI / 2, TILE);
+      const front = level === 0 ? groundFront(i) : upperFront(level, i);
+      put(front, localX, frontZ, y, -Math.PI / 2, TILE);
+
+      const isEnd = i === 0 || i === last;
+      const back =
+        level === 0
+          ? plain
+          : i === Math.floor(building.width / 2) && !isEnd
+            ? 'wall-wood-window-small'
+            : topBand(building, level, i);
+      put(back, localX, backZ, y, Math.PI / 2, TILE);
     }
 
     for (let i = 0; i < building.depth; i += 1) {
       const localZ = -halfD + TILE / 2 + i * TILE;
-      put(sideModule(building, level, i), -halfW + TILE / 2, localZ, y, Math.PI, TILE);
-      put(sideModule(building, level, i), halfW - TILE / 2, localZ, y, 0, TILE);
+      const side =
+        level === 0
+          ? plain
+          : i === Math.floor(building.depth / 2)
+            ? 'wall-wood-window-small'
+            : topBand(building, level, i);
+      put(side, -sideX, localZ, y, Math.PI, TILE);
+      put(side, sideX, localZ, y, 0, TILE);
     }
   }
 
   const roofY = ground + building.levels * TILE;
-  const roofModule = building.roof === 'detail' ? 'roof-high-gable-detail' : 'roof-high-gable';
+  const rise = roofRise(building.roof);
+  const roofModule = ROOF_MODULE[building.roof];
   const across = building.ridge === 'x' ? building.depth : building.width;
   const ridgeCount = building.ridge === 'x' ? building.width : building.depth;
+  // One ridge tile covers 2.2 m across at TILE scale; add eaves and jetty.
+  const acrossTiles = (across * TILE + 0.8 + (building.jetty ? 0.6 : 0)) / (1.1 * TILE);
 
   for (let i = 0; i < ridgeCount; i += 1) {
     if (building.ridge === 'x') {
-      put(roofModule, -halfW + TILE / 2 + i * TILE, 0, roofY, 0, TILE, across + 0.2);
+      put(roofModule, -halfW + TILE / 2 + i * TILE, 0, roofY, 0, TILE, acrossTiles);
     } else {
-      put(roofModule, 0, -halfD + TILE / 2 + i * TILE, roofY, Math.PI / 2, TILE, across + 0.2);
+      put(roofModule, 0, -halfD + TILE / 2 + i * TILE, roofY, Math.PI / 2, TILE, acrossTiles);
     }
   }
 
   if (building.chimney) {
-    put('chimney', -halfW + TILE * 0.9, 0, roofY + 0.9, 0, TILE * 1.05);
+    put('chimney', -halfW + 1.0, -halfD * 0.4, roofY + rise * 0.45, 0, 2.4);
   }
 
-  if (building.awning) {
-    // Lean-to forge shelter on the local +X side, opening onto the west lane.
-    put('roof-high', halfW + 1.15, 0, ground + 1.9, Math.PI, TILE, building.depth + 0.5);
-    put('pillar-wood', halfW + 2.15, -halfD + TILE * 0.55, ground, 0, TILE);
-    put('pillar-wood', halfW + 2.15, halfD - TILE * 0.55, ground, 0, TILE);
+  if (building.canopy) {
+    // Small tiled awning over the door, high edge tucked into the wall.
+    put('roof-high', doorX, halfD + 1.1, ground + 2.15, Math.PI / 2, 1.15, 1.6);
+  }
+
+  if (building.portico) {
+    // Guild porch: a deeper canopy carried on two posts, with paired banners.
+    put('roof-high', doorX, halfD + 1.9, ground + 2.2, Math.PI / 2, 1.7, 1.9);
+    put('pillar-wood', doorX - 1.15, halfD + 1.62, ground, 0, 2.2);
+    put('pillar-wood', doorX + 1.15, halfD + 1.62, ground, 0, 2.2);
+    put('banner-red', doorX - 1.9, halfD + 0.15, ground + 3.5, 0, 2);
+    put('banner-green', doorX + 1.9, halfD + 0.15, ground + 3.5, 0, 2);
+  }
+
+  if (building.forge) {
+    // Open forge yard tacked onto the local -X wall, with two posts at the eave.
+    put('roof-high', -halfW - 1.9, 0, ground + 1.8, 0, 2, 2.2);
+    put('pillar-wood', -halfW - 1.9, -halfD + 0.9, ground, 0, 1.95);
+    put('pillar-wood', -halfW - 1.9, halfD - 0.9, ground, 0, 1.95);
   }
 
   return out;
+}
+
+/** Plain infill for back and side walls; the guild keeps its stone band. */
+function topBand(building: BuildingSpec, level: number, index: number): string {
+  if (building.id === 'guild' && (level % 2 === 1 || index === 0)) return 'wall-window-stone';
+  return 'wall-wood';
 }
 
 // ---------------------------------------------------------------------------
@@ -503,51 +622,63 @@ export interface PropSpec {
   solid?: PropSolid;
 }
 
-/** Street furniture, market stalls and greenery. Kept deliberately sparse. */
+/**
+ * Street furniture, market and greenery. Every prop earns its place: the market
+ * row faces the fountain, carts and planks belong to the smithy and storehouse,
+ * lanterns mark thresholds, and the trees frame the street without blocking it.
+ */
 export const TOWN_PROPS: PropSpec[] = [
-  // Plaza market and fountain.
-  { kind: 'fountain-round', x: 0, z: 0, yaw: 0, scale: TILE * 1.2, solid: { shape: 'cylinder', radius: 2.4, height: 0.8 } },
-  { kind: 'fountain-center', x: 0, z: 0, yaw: 0, scale: TILE * 1.1, lift: 0.28 },
-  { kind: 'stall-red', x: -4.2, z: 3.2, yaw: 2.55, scale: TILE, solid: { shape: 'box', halfX: 1, halfZ: 1, height: 2.5 } },
-  { kind: 'stall-green', x: 3.2, z: 4.6, yaw: -2.35, scale: TILE, solid: { shape: 'box', halfX: 1, halfZ: 1, height: 2.5 } },
-  { kind: 'stall-bench', x: -3.9, z: -3.4, yaw: 2.2, scale: TILE * 0.9, solid: { shape: 'box', halfX: 0.95, halfZ: 0.45, height: 0.6 } },
-  { kind: 'stall-stool', x: -5.6, z: 1.8, yaw: 0.4, scale: TILE * 0.8 },
-  { kind: 'banner-red', x: -5, z: -10.92, yaw: Math.PI / 2, scale: 1.7, lift: 2.6 },
-  { kind: 'banner-green', x: -2, z: -10.92, yaw: Math.PI / 2, scale: 1.7, lift: 2.6 },
-  { kind: 'banner-red', x: 11.44, z: -1.5, yaw: 0, scale: 1.7, lift: 2.7 },
+  // --- fountain and market row -------------------------------------------
+  { kind: 'fountain-round', x: 0, z: 0, yaw: 0, scale: 2.5, solid: { shape: 'cylinder', radius: 2.5, height: 0.9 } },
+  { kind: 'fountain-center', x: 0, z: 0, yaw: 0, scale: 2.2, lift: 0.5 },
+  { kind: 'stall-red', x: 5.6, z: 2.6, yaw: -Math.PI / 2, scale: TILE, solid: { shape: 'box', halfX: 1, halfZ: 1, height: 2.4 } },
+  { kind: 'stall-green', x: 5.6, z: -0.2, yaw: -Math.PI / 2, scale: TILE, solid: { shape: 'box', halfX: 1, halfZ: 1, height: 2.4 } },
+  { kind: 'stall-red', x: 5.4, z: -3.0, yaw: -1.9, scale: TILE, solid: { shape: 'box', halfX: 1, halfZ: 1, height: 2.4 } },
+  { kind: 'stall-bench', x: 3.4, z: -5.6, yaw: -0.4, scale: TILE * 0.95, solid: { shape: 'box', halfX: 0.95, halfZ: 0.45, height: 0.6 } },
+  { kind: 'stall-stool', x: 4.2, z: 4.6, yaw: 0.5, scale: 1.6 },
+  { kind: 'cart', x: 7.0, z: 5.4, yaw: 1.2, scale: TILE, solid: { shape: 'box', halfX: 1.05, halfZ: 1.4, height: 1.4 } },
+  { kind: 'planks-half', x: 8.0, z: -1.6, yaw: 0.3, scale: TILE, solid: { shape: 'box', halfX: 0.9, halfZ: 1, height: 0.7 } },
 
-  // Street lanterns.
-  { kind: 'lantern', x: 3.1, z: 13.4, yaw: 0, scale: 1.45, solid: { shape: 'cylinder', radius: 0.3, height: 2.3 } },
-  { kind: 'lantern', x: -3.1, z: 13.4, yaw: 0, scale: 1.45, solid: { shape: 'cylinder', radius: 0.3, height: 2.3 } },
-  { kind: 'lantern', x: 3.1, z: 6.4, yaw: 0, scale: 1.45, solid: { shape: 'cylinder', radius: 0.3, height: 2.3 } },
-  { kind: 'lantern', x: -3.1, z: 6.4, yaw: 0, scale: 1.45, solid: { shape: 'cylinder', radius: 0.3, height: 2.3 } },
-  { kind: 'lantern', x: 5.2, z: -8.6, yaw: 0, scale: 1.45, solid: { shape: 'cylinder', radius: 0.3, height: 2.3 } },
-  { kind: 'lantern', x: -5.2, z: -8.6, yaw: 0, scale: 1.45, solid: { shape: 'cylinder', radius: 0.3, height: 2.3 } },
-  { kind: 'lantern', x: -6.9, z: -10.4, yaw: 0, scale: 1.45, solid: { shape: 'cylinder', radius: 0.3, height: 2.3 } },
-  { kind: 'lantern', x: 11.2, z: 1.6, yaw: 0, scale: 1.45, solid: { shape: 'cylinder', radius: 0.3, height: 2.3 } },
-  { kind: 'lantern', x: -15.2, z: -6.4, yaw: 0, scale: 1.45, solid: { shape: 'cylinder', radius: 0.3, height: 2.3 } },
+  // --- guild frontage -----------------------------------------------------
+  { kind: 'lantern', x: -6.9, z: -10.6, yaw: 0, scale: 1.45, solid: { shape: 'cylinder', radius: 0.3, height: 2.3 } },
 
-  // Carts and workshop clutter.
-  { kind: 'cart', x: -17.4, z: -4.6, yaw: 1.2, scale: TILE * 1.1, solid: { shape: 'box', halfX: 1.05, halfZ: 1.4, height: 1.5 } },
-  { kind: 'cart', x: -12.4, z: 1.6, yaw: 1.25, scale: TILE, solid: { shape: 'box', halfX: 0.95, halfZ: 1.3, height: 1.4 } },
-  { kind: 'cart-high', x: 16.4, z: 6.2, yaw: 0.9, scale: TILE, solid: { shape: 'box', halfX: 0.95, halfZ: 1.3, height: 1.6 } },
-  { kind: 'planks-half', x: -13.2, z: -6.6, yaw: 0.35, scale: TILE, solid: { shape: 'box', halfX: 0.9, halfZ: 1, height: 0.7 } },
-  { kind: 'planks-half', x: 9.9, z: -16.4, yaw: -0.4, scale: TILE * 0.9 },
+  // --- thresholds and street lanterns ------------------------------------
+  { kind: 'lantern', x: -3.1, z: 24.8, yaw: 0, scale: 1.45, solid: { shape: 'cylinder', radius: 0.3, height: 2.3 } },
+  { kind: 'lantern', x: 3.1, z: 24.8, yaw: 0, scale: 1.45, solid: { shape: 'cylinder', radius: 0.3, height: 2.3 } },
+  { kind: 'lantern', x: -4.2, z: 5.4, yaw: 0, scale: 1.45, solid: { shape: 'cylinder', radius: 0.3, height: 2.3 } },
+  { kind: 'lantern', x: 4.2, z: 5.4, yaw: 0, scale: 1.45, solid: { shape: 'cylinder', radius: 0.3, height: 2.3 } },
+  { kind: 'lantern', x: 3.0, z: 15.8, yaw: 0, scale: 1.45, solid: { shape: 'cylinder', radius: 0.3, height: 2.3 } },
+  { kind: 'lantern', x: -3.0, z: 15.4, yaw: 0, scale: 1.45, solid: { shape: 'cylinder', radius: 0.3, height: 2.3 } },
+  { kind: 'lantern', x: -10.4, z: -1.8, yaw: 0, scale: 1.45, solid: { shape: 'cylinder', radius: 0.3, height: 2.3 } },
+  { kind: 'lantern', x: 9.8, z: -6.0, yaw: 0, scale: 1.45, solid: { shape: 'cylinder', radius: 0.3, height: 2.3 } },
 
-  // Gardens, hedges and trees inside the town.
-  { kind: 'fence', x: -10.4, z: 12.5, yaw: Math.PI / 2, scale: TILE, solid: { shape: 'box', halfX: 1.05, halfZ: 0.15, height: 0.8 } },
-  { kind: 'fence', x: -8.4, z: 12.5, yaw: Math.PI / 2, scale: TILE, solid: { shape: 'box', halfX: 1.05, halfZ: 0.15, height: 0.8 } },
-  { kind: 'fence', x: 8.5, z: 12.9, yaw: Math.PI / 2, scale: TILE, solid: { shape: 'box', halfX: 1.05, halfZ: 0.15, height: 0.8 } },
-  { kind: 'fence', x: 10.5, z: 12.9, yaw: Math.PI / 2, scale: TILE, solid: { shape: 'box', halfX: 1.05, halfZ: 0.15, height: 0.8 } },
-  { kind: 'fence', x: -16.4, z: -0.6, yaw: 0, scale: TILE, solid: { shape: 'box', halfX: 0.15, halfZ: 1.05, height: 0.8 } },
-  { kind: 'hedge-large', x: 6.6, z: -5.4, yaw: -0.5, scale: TILE, solid: { shape: 'box', halfX: 0.55, halfZ: 1.05, height: 1.2 } },
-  { kind: 'hedge-large', x: -6.3, z: -5.7, yaw: 0.6, scale: TILE, solid: { shape: 'box', halfX: 0.55, halfZ: 1.05, height: 1.2 } },
-  { kind: 'hedge-large', x: 11.6, z: 4.4, yaw: 1.15, scale: TILE, solid: { shape: 'box', halfX: 0.55, halfZ: 1.05, height: 1.2 } },
-  { kind: 'tree-high-round', x: -5.6, z: -3.6, yaw: 0.4, scale: TILE * 1.3, solid: { shape: 'cylinder', radius: 0.5, height: 7.5 } },
-  { kind: 'tree-high', x: -15.4, z: 6.4, yaw: 1.1, scale: TILE * 1.1, solid: { shape: 'cylinder', radius: 0.4, height: 6.5 } },
-  { kind: 'tree-high', x: 15.7, z: 3.8, yaw: 2.2, scale: TILE, solid: { shape: 'cylinder', radius: 0.4, height: 6 } },
+  // --- banners ------------------------------------------------------------
+  { kind: 'banner-red', x: 3.6, z: 18.5, yaw: 0, scale: 2.0, lift: 3.4 },
+  { kind: 'banner-red', x: -11.3, z: -4.5, yaw: 0, scale: 1.8, lift: 2.7 },
 
-  // The windmill on the north-west rise is the silhouette the town is known by.
+  // --- workshop clutter ---------------------------------------------------
+  { kind: 'cart', x: -9.8, z: -8.2, yaw: 1.2, scale: TILE * 0.95, solid: { shape: 'box', halfX: 1.05, halfZ: 1.4, height: 1.4 } },
+  { kind: 'planks-half', x: -13.6, z: -8.6, yaw: 0.35, scale: TILE, solid: { shape: 'box', halfX: 0.9, halfZ: 1, height: 0.7 } },
+  { kind: 'planks-half', x: 10.4, z: -18.2, yaw: -0.3, scale: 1.8, lift: 0.05 },
+
+  // --- entrance fences and plaza hedges ----------------------------------
+  { kind: 'fence', x: -3.4, z: 29.4, yaw: 0, scale: TILE, solid: { shape: 'box', halfX: 0.1, halfZ: 1.05, height: 0.8 } },
+  { kind: 'fence', x: 3.4, z: 29.4, yaw: 0, scale: TILE, solid: { shape: 'box', halfX: 0.1, halfZ: 1.05, height: 0.8 } },
+  { kind: 'fence', x: -4.6, z: 16.4, yaw: Math.PI / 2, scale: TILE, solid: { shape: 'box', halfX: 1.05, halfZ: 0.1, height: 0.8 } },
+  { kind: 'fence', x: -2.6, z: 16.4, yaw: Math.PI / 2, scale: TILE, solid: { shape: 'box', halfX: 1.05, halfZ: 0.1, height: 0.8 } },
+  { kind: 'hedge-large', x: 4.4, z: 7.4, yaw: 0.3, scale: TILE, solid: { shape: 'box', halfX: 0.55, halfZ: 1.05, height: 1.2 } },
+  { kind: 'hedge-large', x: -4.6, z: 7.2, yaw: -0.3, scale: TILE, solid: { shape: 'box', halfX: 0.55, halfZ: 1.05, height: 1.2 } },
+
+  // --- town trees: frame the street and the square, never the sightline ---
+  { kind: 'tree-high', x: -6.2, z: 30.4, yaw: 0.6, scale: TILE * 1.15, solid: { shape: 'cylinder', radius: 0.5, height: 7 } },
+  { kind: 'tree-high', x: 6.2, z: 30.0, yaw: 2.1, scale: TILE * 1.05, solid: { shape: 'cylinder', radius: 0.5, height: 6.6 } },
+  { kind: 'tree-high-round', x: -8.0, z: 3.0, yaw: 0.4, scale: TILE * 1.3, solid: { shape: 'cylinder', radius: 0.5, height: 7.5 } },
+  { kind: 'tree-high-round', x: 9.8, z: 6.0, yaw: 2.4, scale: TILE * 1.1, solid: { shape: 'cylinder', radius: 0.5, height: 6.5 } },
+  { kind: 'tree-high', x: -8.4, z: 10.2, yaw: 1.1, scale: TILE * 1.0, solid: { shape: 'cylinder', radius: 0.5, height: 6 } },
+  { kind: 'tree-high-round', x: 12.4, z: 2.0, yaw: 0.9, scale: TILE * 1.05, solid: { shape: 'cylinder', radius: 0.5, height: 6.2 } },
+  { kind: 'tree-high', x: 11.0, z: -19.0, yaw: 2.8, scale: TILE * 1.1, solid: { shape: 'cylinder', radius: 0.5, height: 6.6 } },
+
+  // --- the windmill on the north-west rise --------------------------------
   { kind: 'windmill', x: TOWN.windmill.x, z: TOWN.windmill.z, yaw: 0.6, scale: 2.6, solid: { shape: 'cylinder', radius: 1.3, height: 7 } },
 ];
 
@@ -567,8 +698,10 @@ export function propPlacements(): TownPlacement[] {
 // ---------------------------------------------------------------------------
 
 /**
- * Cobble tiles, laid as short strips along every stone path plus a paved plaza.
- * Dirt lanes stay unpaved (the ground shader carries their colour).
+ * Cobble tiles are laid as a worn ring around the fountain and as a single
+ * threshold slab at each door — not as a carpet over every lane. Dirt streets
+ * and the climbs stay painted by the ground shader, which avoids both tile gaps
+ * and staircases of floating slabs.
  */
 export function roadPlacements(): TownPlacement[] {
   const out: TownPlacement[] = [];
@@ -580,8 +713,6 @@ export function roadPlacements(): TownPlacement[] {
     seen.add(key);
     if (isInsideBuilding(x, z, 0.2)) return;
 
-    // Flat slabs are only laid on level ground; the climb to the gate stays
-    // bare stone-coloured ground rather than a staircase of floating tiles.
     const slope = Math.max(
       Math.abs(heightAt(x + 1, z) - heightAt(x - 1, z)),
       Math.abs(heightAt(x, z + 1) - heightAt(x, z - 1)),
@@ -591,39 +722,21 @@ export function roadPlacements(): TownPlacement[] {
     out.push({ module: 'road', x, y: heightAt(x, z) + 0.045, z, yaw: 0, scale: TILE });
   };
 
-  // Plaza paving, skipping the fountain basin.
-  for (let x = -6; x <= 6; x += TILE) {
-    for (let z = -6; z <= 6; z += TILE) {
-      if (Math.hypot(x, z) > TOWN.plaza.radius - 0.8) continue;
-      if (Math.abs(x) < 2.6 && Math.abs(z) < 2.6) continue;
+  // Paved square: a disc with a grass rim, so the fountain sits on stone and the
+  // market stalls stand at the edge of it.
+  for (let x = -8; x <= 8; x += TILE) {
+    for (let z = -8; z <= 8; z += TILE) {
+      const r = Math.hypot(x, z);
+      if (r < 2.2 || r > TOWN.plaza.radius - 0.2) continue;
       add(x, z);
     }
   }
 
-  for (const path of PATHS) {
-    if (path.kind !== 'stone') continue;
-
-    const across = Math.max(1, Math.floor(path.width / TILE));
-    const offsets: number[] = [];
-    for (let i = 0; i < across; i += 1) offsets.push((i - (across - 1) / 2) * TILE);
-
-    for (let i = 0; i < path.points.length - 1; i += 1) {
-      const a = path.points[i];
-      const b = path.points[i + 1];
-      const length = Math.hypot(b.x - a.x, b.z - a.z);
-      if (length < 1e-6) continue;
-      const dirX = (b.x - a.x) / length;
-      const dirZ = (b.z - a.z) / length;
-      const normalX = -dirZ;
-      const normalZ = dirX;
-
-      for (let travelled = 0; travelled <= length; travelled += TILE) {
-        const cx = a.x + dirX * travelled;
-        const cz = a.z + dirZ * travelled;
-        if (Math.hypot(cx - TOWN.plaza.x, cz - TOWN.plaza.z) < TOWN.plaza.radius - 1.2) continue;
-        for (const offset of offsets) add(cx + normalX * offset, cz + normalZ * offset);
-      }
-    }
+  // One stone threshold slab outside each door.
+  for (const building of BUILDINGS) {
+    const door = doorPoint(building);
+    const outward = { x: Math.sin(building.yaw), z: Math.cos(building.yaw) };
+    add(door.x + outward.x * 1.15, door.z + outward.z * 1.15);
   }
 
   return out;
@@ -649,9 +762,9 @@ export interface GateLayout {
 }
 
 /**
- * The sealed entrance: a stone arch filled by a wall plug, flanked by two
- * wings and two torch pillars. The seal sits inside the arch, so the courtyard
- * is walkable but the passage is not.
+ * The sealed entrance: a stone arch filled by a wall plug, flanked by two wings
+ * and two torch pillars. The seal sits inside the arch, so the courtyard is
+ * walkable but the passage is not.
  */
 export const GATE: GateLayout = {
   x: TOWN.gate.x,
@@ -740,12 +853,18 @@ export function townObstacles(): CameraObstacle[] {
 /** Modules that the renderer must load. Kept explicit so a typo fails fast. */
 export const TOWN_MODULES = [
   'wall',
-  'wall-door',
   'wall-wood',
+  'wall-door',
   'wall-wood-door',
   'wall-wood-window-small',
+  'wall-window-stone',
+  'wall-window-shutters',
+  'wall-window-round',
+  'wall-detail-cross',
   'roof-high-gable',
   'roof-high-gable-detail',
+  'roof-gable',
+  'roof-gable-detail',
   'roof-high',
   'chimney',
   'pillar-wood',
@@ -760,13 +879,13 @@ export const TOWN_MODULES = [
   'banner-green',
   'lantern',
   'cart',
-  'cart-high',
   'planks-half',
   'fence',
   'hedge-large',
   'tree-high',
   'tree-high-round',
   'windmill',
+  'rock-large',
 ] as const;
 
 export type TownModule = (typeof TOWN_MODULES)[number];
